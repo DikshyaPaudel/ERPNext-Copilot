@@ -1,0 +1,8 @@
+{
+ "doctype": "Page",
+ "module": "Erpnext Copilot",
+ "name": "copilot_chat",
+ "page_name": "copilot_chat",
+ "title": "ERPNext Copilot",
+ "standard": "Yes"
+}

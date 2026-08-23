@@ -20,7 +20,6 @@ import json
 import frappe
 from google import genai
 from google.genai import types
-
 import erpnext_copilot.custom_code.api as api
 
 # ---------------------------------------------------------------------------
@@ -56,7 +55,60 @@ AGGREGATE_DOCUMENTS_DECLARATION = types.FunctionDeclaration(
         required=["doctype", "group_by"],
     ),
 )
+SEARCH_DOCUMENTS_DECLARATION = types.FunctionDeclaration(
+    name="search_documents",
+    description="Search any DocType with structured filters, e.g. find Sales Orders for a specific customer.",
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "doctype": types.Schema(type=types.Type.STRING),
+            "filters": types.Schema(type=types.Type.OBJECT, description="Field-value filters, e.g. {'customer': 'Acme'}."),
+            "fields": types.Schema(type=types.Type.ARRAY, items=types.Schema(type=types.Type.STRING)),
+            "limit": types.Schema(type=types.Type.INTEGER),
+        },
+        required=["doctype"],
+    ),
+)
 
+SEARCH_DOCTYPE_DECLARATION = types.FunctionDeclaration(
+    name="search_doctype",
+    description="Text search within one DocType by name/title, e.g. find a customer by partial name.",
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "doctype": types.Schema(type=types.Type.STRING),
+            "query": types.Schema(type=types.Type.STRING),
+            "limit": types.Schema(type=types.Type.INTEGER),
+        },
+        required=["doctype", "query"],
+    ),
+)
+
+FETCH_DECLARATION = types.FunctionDeclaration(
+    name="fetch",
+    description="Get the full details of one specific document by its ID.",
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "doctype": types.Schema(type=types.Type.STRING),
+            "name": types.Schema(type=types.Type.STRING),
+        },
+        required=["doctype", "name"],
+    ),
+)
+
+SEARCH_DECLARATION = types.FunctionDeclaration(
+    name="search",
+    description="Global search across all DocTypes when you don't know which DocType to look in.",
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "query": types.Schema(type=types.Type.STRING),
+            "limit": types.Schema(type=types.Type.INTEGER),
+        },
+        required=["query"],
+    ),
+)
 GET_DOCTYPE_FIELDS_DECLARATION = types.FunctionDeclaration(
     name="get_doctype_fields",
     description="Return the field schema (fieldname, label, fieldtype, required) for a DocType. Use this to check what fields already exist before proposing a new field or DocType, or before querying unfamiliar data.",
@@ -130,6 +182,10 @@ TOOLS = types.Tool(function_declarations=[
     READ_UPLOADED_FILE_DECLARATION,
     CREATE_DOCTYPE_DECLARATION,
     CREATE_DASHBOARD_CHART_DECLARATION,
+    SEARCH_DOCUMENTS_DECLARATION,
+    SEARCH_DOCTYPE_DECLARATION,
+    FETCH_DECLARATION,
+    SEARCH_DECLARATION,
 ])
 
 TOOL_DISPATCH = {
@@ -139,6 +195,10 @@ TOOL_DISPATCH = {
     "read_uploaded_file": api.read_uploaded_file,
     "create_doctype": api.create_doctype,
     "create_dashboard_chart": api.create_dashboard_chart,
+    "search_documents": api.search_documents,
+    "search_doctype": api.search_doctype,
+    "fetch": api.fetch,
+    "search": api.search,
 }
 
 # Tools that change data — gated by an explicit human confirmation in

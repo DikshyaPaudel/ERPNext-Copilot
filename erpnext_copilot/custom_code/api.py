@@ -8,7 +8,7 @@ frappe.get_all() / frappe.get_doc() / frappe.get_meta(). No separate API key
 or manual permission logic is used — this is the main advantage of running
 inside the Frappe app rather than as an external script.
 """
-
+import json
 from typing import Optional
 import frappe
 
@@ -244,3 +244,66 @@ def create_dashboard_chart(chart_name: str, document_type: str, group_by_based_o
         "chart_name": doc.name,
         "message": f"Chart '{chart_name}' created. View it under Dashboard > Charts, or add it to a Workspace.",
     }
+
+@frappe.whitelist()
+def search_documents(doctype: str, filters: Optional[dict] = None, fields: Optional[list] = None, limit: int = 20):
+    """Search a DocType with structured filters — the generic version of
+    something like 'list invoices for customer X'. filters uses Frappe's
+    filter dict syntax, e.g. {"customer": "Acme", "outstanding_amount": [">", 0]}.
+    """
+    if not frappe.db.exists("DocType", doctype):
+        return {"error": f"'{doctype}' is not a valid DocType."}
+
+    meta = frappe.get_meta(doctype)
+
+    if fields:
+        bad_fields = [f for f in fields if f != "name" and not meta.has_field(f)]
+        if bad_fields:
+            return {"error": f"Invalid fields for {doctype}: {bad_fields}"}
+    else:
+        fields = ["name"] + [f.fieldname for f in meta.fields if f.in_list_view][:6]
+
+    if filters:
+        for key in filters:
+            if not meta.has_field(key) and key != "name":
+                return {"error": f"'{key}' is not a valid field on {doctype}."}
+
+    results = frappe.get_all(doctype, filters=filters or {}, fields=fields, limit=limit)
+    return json.loads(json.dumps(results, default=str))
+
+
+@frappe.whitelist()
+def search_doctype(doctype: str, query: str, limit: int = 20):
+    """Text search within a single DocType — searches its title/name field
+    for a loose match, e.g. find customers by partial name."""
+    if not frappe.db.exists("DocType", doctype):
+        return {"error": f"'{doctype}' is not a valid DocType."}
+
+    meta = frappe.get_meta(doctype)
+    search_field = meta.title_field or "name"
+
+    results = frappe.get_all(
+        doctype,
+        filters={search_field: ["like", f"%{query}%"]},
+        fields=["name", search_field] if search_field != "name" else ["name"],
+        limit=limit,
+    )
+    return json.loads(json.dumps(results, default=str))
+
+
+@frappe.whitelist()
+def fetch(doctype: str, name: str):
+    """Get a single document by its ID/name."""
+    if not frappe.db.exists(doctype, name):
+        return {"error": f"No {doctype} found with name '{name}'."}
+    doc = frappe.get_doc(doctype, name)
+    return json.loads(doc.as_json())
+
+
+@frappe.whitelist()
+def search(query: str, limit: int = 20):
+    """Global search across all DocTypes using Frappe's built-in search,
+    for when the user doesn't know which DocType to look in."""
+    from frappe.utils.global_search import search as global_search
+    results = global_search(text=query, start=0, limit=limit)
+    return json.loads(json.dumps(results, default=str))
