@@ -22,13 +22,14 @@ and asks for confirmation first — in the browser as a real dialog, or in
 the console as a y/n prompt — showing exactly what it's about to do
 before it does it.
 
-<!-- ## Screenshots -->
+## Screenshots
 
-<!-- Add screenshots here, e.g.: -->
-<!-- ![Chat interface](docs/screenshots/chat.png) -->
-<!-- ![Confirmation dialog before a write action](docs/screenshots/confirm.png) -->
-<!-- ![Generated dashboard chart](docs/screenshots/chart.png) -->
 
+![Chat interface](docs/screenshots/1st.png)
+![Chat interface asking about doctype generation](docs/screenshots/1st.png)
+
+![Browser confirmation dialog before creating a DocType](docs/screenshots/confirm.png)
+![Successful creation](docs/screenshots/4th.png)
 ## Quick start
 
 ```bash
