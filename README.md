@@ -2,7 +2,6 @@
 
 > Ask your ERPNext site to do things, in plain English. A self-built Gemini-powered agent for ERPNext, running as a real installed Frappe app.
 
-!
 ## What you get
 
 Type things you'd normally click through ERPNext's UI for:
@@ -132,4 +131,4 @@ only showed up in the web interface — see
 
 ## License
 
-MIT (or update to whatever you prefer)
+MIT
