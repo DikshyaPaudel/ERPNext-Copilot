@@ -5,6 +5,16 @@ request/response shape: one call in, one reply out, with conversation
 history and any pending write-confirmation kept server-side in cache
 (keyed per user) since HTTP has no persistent process the way a console
 session does.
+
+History is stored as the full serialized Content/Part objects (not a
+hand-picked subset of fields) because Gemini 3.x attaches a
+thought_signature to function-call parts, and requires that signature to
+still be present when that turn is sent back in a later request. Dropping
+unrecognized fields when flattening to a simplified dict caused a
+400 INVALID_ARGUMENT error the first time a multi-turn tool-confirmation
+flow was tested through the web interface (never surfaced in bench console
+testing, since that flow kept the in-memory history list directly rather
+than round-tripping through cache).
 """
 
 import frappe
@@ -35,29 +45,17 @@ def _get_client():
 
 
 def _content_to_raw(content):
-    """Store the full Content as a JSON-safe dict, preserving everything
-    (including thought_signature on function-call parts, which Gemini 3.x
-    requires to be present on any function-call turn sent back to it)."""
-    return {
-        "role": content.role,
-        "parts": [p.model_dump(exclude_none=True, mode="json") for p in content.parts],
-    }
+    """Store the full Content as a JSON-safe dict, preserving everything —
+    including thought_signature on function-call parts, which Gemini 3.x
+    requires to be present on any function-call turn sent back to it."""
+    return {"role": content.role, "parts": [p.model_dump(exclude_none=True, mode="json") for p in content.parts]}
 
 
 def _raw_to_history(raw):
-    """Reconstruct list of types.Content from cached JSON dicts."""
     history = []
     for item in raw:
-        if "parts" not in item:
-            # Legacy cache item format without parts key
-            if item.get("kind") == "text":
-                history.append(types.Content(role=item.get("role", "user"), parts=[types.Part(text=item.get("text", ""))]))
-            continue
-        try:
-            parts = [types.Part.model_validate(p) for p in item["parts"]]
-            history.append(types.Content(role=item["role"], parts=parts))
-        except Exception:
-            continue
+        parts = [types.Part.model_validate(p) for p in item["parts"]]
+        history.append(types.Content(role=item["role"], parts=parts))
     return history
 
 
@@ -95,17 +93,18 @@ def ask_agent(message: str):
         fn_args = dict(function_call.args)
 
         if fn_name in WRITE_TOOLS:
-            frappe.cache().set_value(_pending_key(), {"tool": fn_name, "args": fn_args, "history_raw": history_raw}, expires_in_sec=600)
+            # Stop here — don't execute yet. Store enough state to resume
+            # after the frontend gets user confirmation.
+            frappe.cache().set_value(_pending_key(), {
+                "tool": fn_name, "args": fn_args, "history_raw": history_raw,
+            }, expires_in_sec=600)
             return {"type": "pending_action", "tool": fn_name, "args": fn_args}
 
         fn = TOOL_DISPATCH.get(fn_name)
         result = fn(**fn_args) if fn else {"error": f"Unknown tool {fn_name}"}
         clean_result = _sanitize_tool_result(result)
 
-        fn_response_content = types.Content(
-            role="user",
-            parts=[types.Part.from_function_response(name=fn_name, response={"result": clean_result})],
-        )
+        fn_response_content = types.Content(role="user", parts=[types.Part.from_function_response(name=fn_name, response={"result": clean_result})])
         history.append(fn_response_content)
         history_raw.append(_content_to_raw(fn_response_content))
 
@@ -134,24 +133,22 @@ def confirm_pending_action(approved: bool):
         result = {"cancelled": True, "message": "Action cancelled by user."}
 
     clean_result = _sanitize_tool_result(result)
-    fn_response_content = types.Content(
-        role="user",
-        parts=[types.Part.from_function_response(name=fn_name, response={"result": clean_result})],
-    )
+    fn_response_content = types.Content(role="user", parts=[types.Part.from_function_response(name=fn_name, response={"result": clean_result})])
     history_raw.append(_content_to_raw(fn_response_content))
-    _save_history(history_raw)
+    _save_history(history_raw)  # save first, so this result is in place before we continue the conversation
 
     return _continue_after_tool_result(history_raw)
 
 
 def _continue_after_tool_result(history_raw):
+    """Lets the model produce a natural-language summary of a tool result
+    (or chain into another tool call, e.g. a multi-step request)."""
     client = _get_client()
     config_with_tools = types.GenerateContentConfig(system_instruction=SYSTEM_INSTRUCTION, tools=[TOOLS])
     history = _raw_to_history(history_raw)
 
     response = client.models.generate_content(model="gemini-3.6-flash", contents=history, config=config_with_tools)
     candidate_content = response.candidates[0].content
-    history.append(candidate_content)
     history_raw.append(_content_to_raw(candidate_content))
     _save_history(history_raw)
 
@@ -159,11 +156,9 @@ def _continue_after_tool_result(history_raw):
     if function_call:
         fn_args = dict(function_call.args)
         if function_call.name in WRITE_TOOLS:
-            frappe.cache().set_value(
-                _pending_key(),
-                {"tool": function_call.name, "args": fn_args, "history_raw": history_raw},
-                expires_in_sec=600,
-            )
+            frappe.cache().set_value(_pending_key(), {
+                "tool": function_call.name, "args": fn_args, "history_raw": history_raw,
+            }, expires_in_sec=600)
             return {"type": "pending_action", "tool": function_call.name, "args": fn_args}
 
     return {"type": "reply", "text": _extract_text(candidate_content)}
