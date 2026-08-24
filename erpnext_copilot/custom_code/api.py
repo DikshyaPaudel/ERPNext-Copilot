@@ -212,10 +212,68 @@ def create_doctype(doctype_name: str, fields: list, module: str = "Custom"):
 
 
 @frappe.whitelist()
-def create_dashboard_chart(chart_name: str, document_type: str, group_by_based_on: str, chart_type: str = "Bar"):
+def list_dashboards():
+    """List all available Dashboards in ERPNext (e.g. Selling, Buying, Accounts)."""
+    dashboards = frappe.get_all("Dashboard", fields=["name", "dashboard_name", "module"])
+    return json.loads(json.dumps(dashboards, default=str))
+
+
+@frappe.whitelist()
+def add_chart_to_dashboard(chart_name: str, dashboard_name: str):
+    """Add an existing Dashboard Chart to a Dashboard by adding a link row in
+    the Dashboard's `charts` child table.
+    """
+    real_chart = chart_name
+    if not frappe.db.exists("Dashboard Chart", real_chart):
+        charts = frappe.get_all("Dashboard Chart", filters={"chart_name": chart_name}, limit=1)
+        if charts:
+            real_chart = charts[0].name
+        else:
+            return {"error": f"Dashboard Chart '{chart_name}' does not exist in Frappe."}
+
+    real_dashboard = dashboard_name
+    if not frappe.db.exists("Dashboard", real_dashboard):
+        dashboards = frappe.get_all("Dashboard", filters={"dashboard_name": dashboard_name}, limit=1)
+        if dashboards:
+            real_dashboard = dashboards[0].name
+        else:
+            return {"error": f"Dashboard '{dashboard_name}' does not exist in Frappe."}
+
+    dashboard = frappe.get_doc("Dashboard", real_dashboard)
+
+    # Check if already added
+    for link in dashboard.charts:
+        if link.chart == real_chart:
+            return {
+                "success": True,
+                "message": f"Chart '{real_chart}' is already attached to Dashboard '{real_dashboard}'.",
+                "dashboard": real_dashboard,
+                "chart_name": real_chart,
+            }
+
+    dashboard.append("charts", {"chart": real_chart})
+    dashboard.save(ignore_permissions=True)
+    frappe.db.commit()
+
+    return {
+        "success": True,
+        "message": f"Chart '{real_chart}' successfully added to Dashboard '{real_dashboard}'.",
+        "dashboard": real_dashboard,
+        "chart_name": real_chart,
+    }
+
+
+@frappe.whitelist()
+def create_dashboard_chart(
+    chart_name: str,
+    document_type: str,
+    group_by_based_on: str,
+    chart_type: str = "Bar",
+    dashboard_name: Optional[str] = None,
+):
     """Create a native ERPNext Dashboard Chart for any DocType, grouped by
     any field. Viewable in ERPNext's own Dashboard/Workspace UI after
-    creation — not just returned as raw data.
+    creation — not just returned as raw data. Option to link to a Dashboard.
     """
     if not frappe.db.exists("DocType", document_type):
         return {"error": f"'{document_type}' is not a valid DocType."}
@@ -237,12 +295,21 @@ def create_dashboard_chart(chart_name: str, document_type: str, group_by_based_o
         "filters_json": "{}",   # required by ERPNext even when there are no filters
         "is_public": 1,
     })
-    doc.insert()
+    doc.insert(ignore_permissions=True)
+    frappe.db.commit()
+
+    added_to_dashboard_msg = ""
+    if dashboard_name:
+        add_res = add_chart_to_dashboard(chart_name=doc.name, dashboard_name=dashboard_name)
+        if "error" in add_res:
+            added_to_dashboard_msg = f" (Failed to add to dashboard '{dashboard_name}': {add_res['error']})"
+        else:
+            added_to_dashboard_msg = f" and added to Dashboard '{dashboard_name}'."
 
     return {
         "success": True,
         "chart_name": doc.name,
-        "message": f"Chart '{chart_name}' created. View it under Dashboard > Charts, or add it to a Workspace.",
+        "message": f"Chart '{chart_name}' created{added_to_dashboard_msg}. View it under Dashboard > Charts, or in the Dashboard UI.",
     }
 
 @frappe.whitelist()

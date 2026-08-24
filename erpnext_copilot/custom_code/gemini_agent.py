@@ -162,7 +162,7 @@ CREATE_DOCTYPE_DECLARATION = types.FunctionDeclaration(
 
 CREATE_DASHBOARD_CHART_DECLARATION = types.FunctionDeclaration(
     name="create_dashboard_chart",
-    description="Create a native ERPNext Dashboard Chart for any DocType, grouped by any field. Viewable in ERPNext's own Dashboard/Workspace UI after creation.",
+    description="Create a native ERPNext Dashboard Chart for any DocType, grouped by any field. Optionally attach it directly to a Dashboard.",
     parameters=types.Schema(
         type=types.Type.OBJECT,
         properties={
@@ -170,8 +170,32 @@ CREATE_DASHBOARD_CHART_DECLARATION = types.FunctionDeclaration(
             "document_type": types.Schema(type=types.Type.STRING, description="The DocType to chart, e.g. 'Sales Invoice'."),
             "group_by_based_on": types.Schema(type=types.Type.STRING, description="Field to group by, e.g. 'customer'."),
             "chart_type": types.Schema(type=types.Type.STRING, description="Bar, Line, Pie, Percentage, or Donut. Defaults to Bar."),
+            "dashboard_name": types.Schema(type=types.Type.STRING, description="Optional Dashboard name to attach this chart to after creation."),
         },
         required=["chart_name", "document_type", "group_by_based_on"],
+    ),
+)
+
+LIST_DASHBOARDS_DECLARATION = types.FunctionDeclaration(
+    name="list_dashboards",
+    description="List all available Dashboards in ERPNext (e.g. Selling, Buying, Accounts) so you can show the user available choices for adding a chart.",
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={},
+        required=[],
+    ),
+)
+
+ADD_CHART_TO_DASHBOARD_DECLARATION = types.FunctionDeclaration(
+    name="add_chart_to_dashboard",
+    description="Add an existing Dashboard Chart to an ERPNext Dashboard (e.g. Selling, Buying, Accounts).",
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "chart_name": types.Schema(type=types.Type.STRING, description="Name of the existing Dashboard Chart."),
+            "dashboard_name": types.Schema(type=types.Type.STRING, description="Name of the Dashboard to add the chart to."),
+        },
+        required=["chart_name", "dashboard_name"],
     ),
 )
 
@@ -182,6 +206,8 @@ TOOLS = types.Tool(function_declarations=[
     READ_UPLOADED_FILE_DECLARATION,
     CREATE_DOCTYPE_DECLARATION,
     CREATE_DASHBOARD_CHART_DECLARATION,
+    LIST_DASHBOARDS_DECLARATION,
+    ADD_CHART_TO_DASHBOARD_DECLARATION,
     SEARCH_DOCUMENTS_DECLARATION,
     SEARCH_DOCTYPE_DECLARATION,
     FETCH_DECLARATION,
@@ -195,6 +221,8 @@ TOOL_DISPATCH = {
     "read_uploaded_file": api.read_uploaded_file,
     "create_doctype": api.create_doctype,
     "create_dashboard_chart": api.create_dashboard_chart,
+    "list_dashboards": api.list_dashboards,
+    "add_chart_to_dashboard": api.add_chart_to_dashboard,
     "search_documents": api.search_documents,
     "search_doctype": api.search_doctype,
     "fetch": api.fetch,
@@ -203,7 +231,7 @@ TOOL_DISPATCH = {
 
 # Tools that change data — gated by an explicit human confirmation in
 # Python, not by trusting the model to self-police.
-WRITE_TOOLS = {"create_doctype", "create_dashboard_chart"}
+WRITE_TOOLS = {"create_doctype", "create_dashboard_chart", "add_chart_to_dashboard"}
 SYSTEM_INSTRUCTION = """You are an ERPNext operations assistant running inside a real
 ERPNext site, acting with the current user's own permissions.
 
@@ -226,8 +254,13 @@ When the user wants to import data from a file:
 - Call read_uploaded_file first to preview it. Never assume column names or content.
 
 When the user wants a chart or dashboard:
-- Use aggregate_documents first if you need to check the data shape, then
-  create_dashboard_chart to actually create a persistent chart in ERPNext.
+- Use aggregate_documents first if you need to check the data shape, then create_dashboard_chart to create a persistent chart in ERPNext.
+- If the user did NOT specify a target dashboard when asking to create a chart:
+  1. Once create_dashboard_chart completes, immediately call list_dashboards to fetch available Dashboards in ERPNext.
+  2. Inform the user that the chart was created successfully.
+  3. Ask: "Would you like to display this chart on a Dashboard?" and present the list of available dashboards as bullet options.
+  4. Prompt the user that they can reply with the name of any Dashboard to add it there.
+- If the user specifies or selects a Dashboard (e.g. "Buying"), YOU MUST EXECUTE the add_chart_to_dashboard function call. NEVER send a text reply claiming the chart was added to a dashboard without actually calling add_chart_to_dashboard first!
 
 If you're unsure whether a DocType or field exists, use get_doctype_fields
 to check rather than guessing.

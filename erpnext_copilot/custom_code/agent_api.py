@@ -142,26 +142,46 @@ def confirm_pending_action(approved: bool):
 
 def _continue_after_tool_result(history_raw):
     """Lets the model produce a natural-language summary of a tool result
-    (or chain into another tool call, e.g. a multi-step request)."""
+    (or chain into another tool call, e.g. list_dashboards right after creating a chart)."""
     client = _get_client()
     config_with_tools = types.GenerateContentConfig(system_instruction=SYSTEM_INSTRUCTION, tools=[TOOLS])
     history = _raw_to_history(history_raw)
 
-    response = client.models.generate_content(model="gemini-3.6-flash", contents=history, config=config_with_tools)
-    candidate_content = response.candidates[0].content
-    history_raw.append(_content_to_raw(candidate_content))
-    _save_history(history_raw)
+    for _ in range(MAX_TOOL_STEPS):
+        response = client.models.generate_content(model="gemini-3.6-flash", contents=history, config=config_with_tools)
+        candidate_content = response.candidates[0].content
+        history.append(candidate_content)
+        history_raw.append(_content_to_raw(candidate_content))
 
-    function_call = next((p.function_call for p in candidate_content.parts if p.function_call), None)
-    if function_call:
+        function_call = next((p.function_call for p in candidate_content.parts if p.function_call), None)
+
+        if not function_call:
+            _save_history(history_raw)
+            return {"type": "reply", "text": _extract_text(candidate_content)}
+
+        fn_name = function_call.name
         fn_args = dict(function_call.args)
-        if function_call.name in WRITE_TOOLS:
-            frappe.cache().set_value(_pending_key(), {
-                "tool": function_call.name, "args": fn_args, "history_raw": history_raw,
-            }, expires_in_sec=600)
-            return {"type": "pending_action", "tool": function_call.name, "args": fn_args}
 
-    return {"type": "reply", "text": _extract_text(candidate_content)}
+        if fn_name in WRITE_TOOLS:
+            frappe.cache().set_value(_pending_key(), {
+                "tool": fn_name, "args": fn_args, "history_raw": history_raw,
+            }, expires_in_sec=600)
+            _save_history(history_raw)
+            return {"type": "pending_action", "tool": fn_name, "args": fn_args}
+
+        fn = TOOL_DISPATCH.get(fn_name)
+        result = fn(**fn_args) if fn else {"error": f"Unknown tool {fn_name}"}
+        clean_result = _sanitize_tool_result(result)
+
+        fn_response_content = types.Content(
+            role="user",
+            parts=[types.Part.from_function_response(name=fn_name, response={"result": clean_result})],
+        )
+        history.append(fn_response_content)
+        history_raw.append(_content_to_raw(fn_response_content))
+
+    _save_history(history_raw)
+    return {"type": "reply", "text": "(stopped after reaching the tool-call safety limit)"}
 
 
 @frappe.whitelist()
