@@ -91,7 +91,7 @@ REPL) and `agent_api.py` (whitelisted HTTP endpoints for the web chat
 page, with conversation state kept server-side per user since HTTP has no
 persistent process the way a console session does).
 
-## Relationship to prior art
+<!-- ## Relationship to prior art
 
 ERPNext + LLM agents isn't a new idea. Before building this, I looked at
 what already exists — most notably
@@ -100,7 +100,7 @@ a production-grade project with OAuth2/PKCE per-user auth, 24 tools, a
 plugin system, and commercial support. This project doesn't try to
 compete with that — it's smaller, self-built, and exists so I'd have
 hands-on experience with the actual pattern (tool-calling against a real
-ERP's permission model, not a toy API) rather than just being able to
+ERP's permission model) rather than just being able to
 describe it.
 
 Where the design overlaps with FAC — generic, DocType-agnostic tools
@@ -116,7 +116,7 @@ smaller problem to solve.
 <!-- For the full list of real bugs hit and fixed while building this — SDK
 quirks, ERPNext validation surprises, a Gemini 3.x API requirement that
 only showed up in the web interface — see
-[`DEBUGGING.md`](./DEBUGGING.md). Kept deliberately, not smoothed over. -->
+[`DEBUGGING.md`](./DEBUGGING.md). Kept deliberately, not smoothed over. --> -->
 
 ## Known limitations
 
