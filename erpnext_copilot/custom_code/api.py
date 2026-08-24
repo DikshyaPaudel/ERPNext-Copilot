@@ -173,6 +173,131 @@ def read_uploaded_file(file_name: str, preview_rows: int = 10):
     }
 
 
+@frappe.whitelist()
+def clean_uploaded_file(file_name: str, target_doctype: str, cleaning_instructions: Optional[str] = None):
+    """Read an uploaded CSV/Excel file, inspect target DocType field schema,
+    and use Gemini to intelligently clean, parse messy dates (e.g. '17th March' -> '2025-03-17'),
+    trim whitespace, resolve fuzzy names, and map fields.
+    """
+    import pandas as pd
+    from google import genai
+    from google.genai import types
+
+    file_doc = None
+    if frappe.db.exists("File", file_name):
+        file_doc = frappe.get_doc("File", file_name)
+    else:
+        matches = frappe.get_all("File", filters={"file_url": file_name}, limit=1)
+        if matches:
+            file_doc = frappe.get_doc("File", matches[0].name)
+
+    if not file_doc:
+        return {"error": f"No uploaded file found matching '{file_name}'."}
+
+    if not frappe.db.exists("DocType", target_doctype):
+        return {"error": f"Target DocType '{target_doctype}' does not exist."}
+
+    meta = frappe.get_meta(target_doctype)
+    target_fields = [
+        {"fieldname": f.fieldname, "label": f.label, "fieldtype": f.fieldtype, "reqd": f.reqd}
+        for f in meta.fields
+        if not f.read_only
+    ]
+
+    path = file_doc.get_full_path()
+    try:
+        if path.lower().endswith(".csv"):
+            df = pd.read_csv(path)
+        elif path.lower().endswith((".xlsx", ".xls")):
+            df = pd.read_excel(path)
+        else:
+            return {"error": f"Unsupported file type: {path}"}
+    except Exception as e:
+        return {"error": f"Could not parse file: {str(e)}"}
+
+    raw_rows = json.loads(df.fillna("").head(50).to_json(orient="records", date_format="iso"))
+
+    gemini_api_key = frappe.conf.get("gemini_api_key")
+    if not gemini_api_key:
+        return {"error": "Gemini API key not configured on site."}
+
+    client = genai.Client(api_key=gemini_api_key)
+
+    prompt = f"""You are an expert ERPNext data cleaning AI assistant.
+Transform and clean the following raw file data to strictly match the target DocType '{target_doctype}' schema.
+
+Target DocType Fields:
+{json.dumps(target_fields, indent=2)}
+
+User Cleaning Instructions:
+{cleaning_instructions or "Standardize dates to YYYY-MM-DD (e.g. '17th March' -> '2025-03-17'), clean text formatting/whitespace, fix messy names, handle missing values."}
+
+Raw Input Data (first {len(raw_rows)} rows):
+{json.dumps(raw_rows, indent=2)}
+
+Output strictly valid JSON with no markdown formatting or text wrappers, matching this exact structure:
+{{
+  "cleaned_records": [
+    {{ "fieldname1": "cleaned_value1", "fieldname2": "cleaned_value2" }}
+  ],
+  "cleaning_summary": ["List of specific transformations performed, e.g. converted '17th March' to '2025-03-17'"]
+}}
+"""
+
+    response = client.models.generate_content(
+        model="gemini-3.6-flash",
+        contents=prompt,
+        config=types.GenerateContentConfig(response_mime_type="application/json"),
+    )
+
+    try:
+        cleaned_result = json.loads(response.text)
+        return {
+            "success": True,
+            "target_doctype": target_doctype,
+            "total_raw_rows": len(df),
+            "cleaned_records": cleaned_result.get("cleaned_records", []),
+            "summary": cleaned_result.get("cleaning_summary", []),
+        }
+    except Exception as e:
+        return {"error": f"Failed to parse cleaned result from LLM: {str(e)}", "raw_response": response.text}
+
+
+@frappe.whitelist()
+def import_data_to_doctype(target_doctype: str, records: list):
+    """Import a list of cleaned records into an ERPNext DocType.
+    Creates documents using frappe.get_doc and commits to database.
+    """
+    if not frappe.db.exists("DocType", target_doctype):
+        return {"error": f"Target DocType '{target_doctype}' does not exist."}
+
+    if isinstance(records, str):
+        records = json.loads(records)
+
+    created = []
+    errors = []
+
+    for idx, row in enumerate(records):
+        try:
+            doc_dict = {"doctype": target_doctype}
+            doc_dict.update(row)
+            doc = frappe.get_doc(doc_dict)
+            doc.insert(ignore_permissions=True)
+            created.append(doc.name)
+        except Exception as e:
+            errors.append(f"Row {idx + 1}: {str(e)}")
+
+    frappe.db.commit()
+
+    return {
+        "success": True,
+        "target_doctype": target_doctype,
+        "created_count": len(created),
+        "created_names": created,
+        "errors": errors,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Writes — every function below should be gated by a confirmation step in
 # gemini_agent.py's WRITE_TOOLS set before being executed.

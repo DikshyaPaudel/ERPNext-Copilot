@@ -120,7 +120,6 @@ GET_DOCTYPE_FIELDS_DECLARATION = types.FunctionDeclaration(
         required=["doctype"],
     ),
 )
-
 READ_UPLOADED_FILE_DECLARATION = types.FunctionDeclaration(
     name="read_uploaded_file",
     description="Preview a CSV or Excel file already uploaded to ERPNext (as a File record). Returns columns and sample rows. Does not import anything.",
@@ -131,6 +130,37 @@ READ_UPLOADED_FILE_DECLARATION = types.FunctionDeclaration(
             "preview_rows": types.Schema(type=types.Type.INTEGER, description="How many rows to preview. Defaults to 10."),
         },
         required=["file_name"],
+    ),
+)
+
+CLEAN_UPLOADED_FILE_DECLARATION = types.FunctionDeclaration(
+    name="clean_uploaded_file",
+    description="Read an uploaded CSV/Excel file, inspect target DocType field schema, and use AI to clean messy dates (e.g. '17th March' -> '2025-03-17'), format text, resolve fuzzy names, and map fields to ERPNext.",
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "file_name": types.Schema(type=types.Type.STRING, description="The File record's name or file_url in ERPNext."),
+            "target_doctype": types.Schema(type=types.Type.STRING, description="The ERPNext DocType to map data to (e.g. 'Customer', 'Sales Invoice')."),
+            "cleaning_instructions": types.Schema(type=types.Type.STRING, description="Specific user instructions for cleaning or transformation."),
+        },
+        required=["file_name", "target_doctype"],
+    ),
+)
+
+IMPORT_DATA_TO_DOCTYPE_DECLARATION = types.FunctionDeclaration(
+    name="import_data_to_doctype",
+    description="Import a list of cleaned structured records into an ERPNext DocType.",
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "target_doctype": types.Schema(type=types.Type.STRING, description="The target ERPNext DocType."),
+            "records": types.Schema(
+                type=types.Type.ARRAY,
+                description="List of clean dictionaries representing document field values.",
+                items=types.Schema(type=types.Type.OBJECT),
+            ),
+        },
+        required=["target_doctype", "records"],
     ),
 )
 
@@ -204,6 +234,8 @@ TOOLS = types.Tool(function_declarations=[
     AGGREGATE_DOCUMENTS_DECLARATION,
     GET_DOCTYPE_FIELDS_DECLARATION,
     READ_UPLOADED_FILE_DECLARATION,
+    CLEAN_UPLOADED_FILE_DECLARATION,
+    IMPORT_DATA_TO_DOCTYPE_DECLARATION,
     CREATE_DOCTYPE_DECLARATION,
     CREATE_DASHBOARD_CHART_DECLARATION,
     LIST_DASHBOARDS_DECLARATION,
@@ -219,6 +251,8 @@ TOOL_DISPATCH = {
     "aggregate_documents": api.aggregate_documents,
     "get_doctype_fields": api.get_doctype_fields,
     "read_uploaded_file": api.read_uploaded_file,
+    "clean_uploaded_file": api.clean_uploaded_file,
+    "import_data_to_doctype": api.import_data_to_doctype,
     "create_doctype": api.create_doctype,
     "create_dashboard_chart": api.create_dashboard_chart,
     "list_dashboards": api.list_dashboards,
@@ -231,7 +265,7 @@ TOOL_DISPATCH = {
 
 # Tools that change data — gated by an explicit human confirmation in
 # Python, not by trusting the model to self-police.
-WRITE_TOOLS = {"create_doctype", "create_dashboard_chart", "add_chart_to_dashboard"}
+WRITE_TOOLS = {"create_doctype", "create_dashboard_chart", "add_chart_to_dashboard", "import_data_to_doctype"}
 SYSTEM_INSTRUCTION = """You are an ERPNext operations assistant running inside a real
 ERPNext site, acting with the current user's own permissions.
 
@@ -250,8 +284,11 @@ When the user wants to create a new DocType:
 - Once you have all fields with types, summarize the full planned schema in
   plain text and ask the user to confirm before calling create_doctype.
 
-When the user wants to import data from a file:
-- Call read_uploaded_file first to preview it. Never assume column names or content.
+When the user wants to import data or clean a file:
+- Call read_uploaded_file to preview raw columns if you need to inspect the raw structure first.
+- Call clean_uploaded_file to transform messy human entries (e.g. '17th March' -> '2025-03-17', fuzzy entity names, address fields) into clean records matching the target DocType schema.
+- Display the summary of transformations and preview the cleaned records for the user.
+- Ask the user for confirmation before calling import_data_to_doctype to write the records into ERPNext.
 
 When the user wants a chart or dashboard:
 - Use aggregate_documents first if you need to check the data shape, then create_dashboard_chart to create a persistent chart in ERPNext.
