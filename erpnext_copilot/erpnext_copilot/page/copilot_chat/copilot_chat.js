@@ -5,7 +5,7 @@ frappe.pages['copilot_chat'].on_page_load = function(wrapper) {
 		single_column: true,
 	});
 
-	// One-time CSS for the typing indicator (WhatsApp-style bouncing dots)
+	// One-time CSS: typing indicator + sidebar list styling
 	if (!$('#copilot-typing-style').length) {
 		$('head').append(`
 			<style id="copilot-typing-style">
@@ -24,16 +24,44 @@ frappe.pages['copilot_chat'].on_page_load = function(wrapper) {
 					0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
 					30% { transform: translateY(-4px); opacity: 1; }
 				}
+				.copilot-convo-item {
+					padding: 8px 10px;
+					border-radius: 6px;
+					cursor: pointer;
+					font-size: 13px;
+					white-space: nowrap;
+					overflow: hidden;
+					text-overflow: ellipsis;
+					display: flex;
+					justify-content: space-between;
+					align-items: center;
+					gap: 6px;
+				}
+				.copilot-convo-item:hover { background: var(--bg-light-gray, var(--bg-gray)); }
+				.copilot-convo-item.active { background: var(--bg-blue); font-weight: 600; }
+				.copilot-convo-delete {
+					opacity: 0;
+					cursor: pointer;
+					color: var(--text-muted);
+					flex-shrink: 0;
+				}
+				.copilot-convo-item:hover .copilot-convo-delete { opacity: 1; }
 			</style>
 		`);
 	}
 
 	const $chat = $(`
-		<div style="max-width: 700px; margin: 0 auto;">
-			<div class="copilot-messages" style="height: 60vh; overflow-y: auto; border: 1px solid var(--border-color); border-radius: 8px; padding: 12px; margin-bottom: 12px;"></div>
-			<div class="d-flex" style="gap: 8px;">
-				<input type="text" class="form-control copilot-input" placeholder="Ask about invoices, create a doctype, build a chart...">
-				<button class="btn btn-primary copilot-send">Send</button>
+		<div style="display: flex; gap: 16px; max-width: 960px; margin: 0 auto;">
+			<div class="copilot-sidebar" style="width: 220px; flex-shrink: 0; border-right: 1px solid var(--border-color); padding-right: 12px;">
+				<button class="btn btn-default btn-sm copilot-new-chat" style="width: 100%; margin-bottom: 10px;">+ New chat</button>
+				<div class="copilot-convo-list" style="max-height: 65vh; overflow-y: auto;"></div>
+			</div>
+			<div style="flex: 1; min-width: 0;">
+				<div class="copilot-messages" style="height: 60vh; overflow-y: auto; border: 1px solid var(--border-color); border-radius: 8px; padding: 12px; margin-bottom: 12px;"></div>
+				<div class="d-flex" style="gap: 8px;">
+					<input type="text" class="form-control copilot-input" placeholder="Ask about invoices, create a doctype, build a chart...">
+					<button class="btn btn-primary copilot-send">Send</button>
+				</div>
 			</div>
 		</div>
 	`).appendTo(page.body);
@@ -41,11 +69,12 @@ frappe.pages['copilot_chat'].on_page_load = function(wrapper) {
 	const $messages = $chat.find('.copilot-messages');
 	const $input = $chat.find('.copilot-input');
 	const $send = $chat.find('.copilot-send');
+	const $convoList = $chat.find('.copilot-convo-list');
+	const $newChatBtn = $chat.find('.copilot-new-chat');
 
-	// --- streaming state for the turn currently in flight -------------
-	// (#2) $currentAgentBubble accumulates streamed text chunks live.
-	// (#3) status lines get their own small entries above the bubble.
-	let $currentAgentBubble = null;
+	// --- state ----------------------------------------------------------
+	let currentConversation = null;   // name of the Copilot Conversation doc, or null until the first message
+	let $currentAgentBubble = null;   // (#2) accumulates streamed text chunks live
 	let streamedAnyText = false;
 
 	function addMessage(text, sender) {
@@ -60,7 +89,7 @@ frappe.pages['copilot_chat'].on_page_load = function(wrapper) {
 	}
 
 	function showTypingIndicator() {
-		removeTypingIndicator(); // never stack more than one
+		removeTypingIndicator();
 		$(`
 			<div class="copilot-typing" style="text-align: left; margin-bottom: 10px;">
 				<span style="display: inline-block; background: var(--bg-gray); padding: 10px 14px; border-radius: 8px;">
@@ -106,7 +135,6 @@ frappe.pages['copilot_chat'].on_page_load = function(wrapper) {
 		$messages.scrollTop($messages[0].scrollHeight);
 	}
 
-	// (#2)/(#3) live updates pushed from agent_api.py via frappe.publish_realtime
 	frappe.realtime.on('copilot_stream_chunk', (data) => appendToAgentBubble(data.text));
 	frappe.realtime.on('copilot_status', (data) => addStatusLine(data.text));
 
@@ -115,17 +143,103 @@ frappe.pages['copilot_chat'].on_page_load = function(wrapper) {
 		streamedAnyText = false;
 	}
 
+	// --- sidebar ----------------------------------------------------------
+
+	function renderConvoList(rows) {
+		$convoList.empty();
+		if (!rows.length) {
+			$convoList.append(`<div style="font-size: 12px; color: var(--text-muted); padding: 8px;">No conversations yet</div>`);
+			return;
+		}
+		rows.forEach((row) => {
+			const $item = $(`
+				<div class="copilot-convo-item ${row.name === currentConversation ? 'active' : ''}" data-name="${row.name}">
+					<span class="copilot-convo-title">${frappe.utils.escape_html(row.title || 'New chat')}</span>
+					<span class="copilot-convo-delete" title="Delete">&times;</span>
+				</div>
+			`).appendTo($convoList);
+
+			$item.on('click', (e) => {
+				if ($(e.target).hasClass('copilot-convo-delete')) return;
+				selectConversation(row.name);
+			});
+			$item.find('.copilot-convo-delete').on('click', (e) => {
+				e.stopPropagation();
+				frappe.confirm(
+					`Delete conversation "${frappe.utils.escape_html(row.title || 'New chat')}"? This can't be undone.`,
+					() => deleteConversation(row.name)
+				);
+			});
+		});
+	}
+
+	function refreshConvoList() {
+		frappe.call({
+			method: 'erpnext_copilot.custom_code.agent_api.list_conversations',
+			callback: (res) => renderConvoList(res.message || []),
+		});
+	}
+
+	function selectConversation(name) {
+		removeTypingIndicator();
+		resetStreamState();
+		frappe.call({
+			method: 'erpnext_copilot.custom_code.agent_api.get_conversation',
+			args: { name },
+			callback: (res) => {
+				const data = res.message;
+				currentConversation = data.name;
+				$messages.empty();
+				(data.messages || []).forEach((m) => addMessage(m.text, m.sender));
+				$convoList.find('.copilot-convo-item').removeClass('active');
+				$convoList.find(`.copilot-convo-item[data-name="${data.name}"]`).addClass('active');
+			},
+		});
+	}
+
+	function startNewChat() {
+		removeTypingIndicator();
+		resetStreamState();
+		frappe.call({
+			method: 'erpnext_copilot.custom_code.agent_api.new_conversation',
+			callback: (res) => {
+				currentConversation = res.message.name;
+				$messages.empty();
+				refreshConvoList();
+				$input.trigger('focus');
+			},
+		});
+	}
+
+	function deleteConversation(name) {
+		frappe.call({
+			method: 'erpnext_copilot.custom_code.agent_api.delete_conversation',
+			args: { name },
+			callback: () => {
+				if (name === currentConversation) {
+					currentConversation = null;
+					$messages.empty();
+				}
+				refreshConvoList();
+			},
+		});
+	}
+
+	$newChatBtn.on('click', startNewChat);
+
+	// --- main send/response flow ------------------------------------------
+
 	function handleResponse(res) {
 		removeTypingIndicator(); // safety net if no realtime event ever arrived
 		const data = res.message;
+		if (data.conversation) currentConversation = data.conversation;
+
 		if (data.type === 'reply') {
 			if (!streamedAnyText) {
-				// Streaming chunks never arrived (e.g. realtime hiccup, or
-				// this was a tool-result summary with no chunks) — fall
-				// back to showing the full text at once, same as before.
 				addMessage(data.text, 'agent');
 			}
 			resetStreamState();
+			refreshConvoList(); // title/order may have just changed
 		} else if (data.type === 'pending_action') {
 			resetStreamState();
 			const argsText = JSON.stringify(data.args, null, 2);
@@ -139,7 +253,7 @@ frappe.pages['copilot_chat'].on_page_load = function(wrapper) {
 
 	function confirmAction(approved) {
 		resetStreamState();
-		if (approved) showTypingIndicator(); // a cancel resolves instantly, no need to show it there
+		if (approved) showTypingIndicator();
 		frappe.call({
 			method: 'erpnext_copilot.custom_code.agent_api.confirm_pending_action',
 			args: { approved },
@@ -158,12 +272,11 @@ frappe.pages['copilot_chat'].on_page_load = function(wrapper) {
 
 		frappe.call({
 			method: 'erpnext_copilot.custom_code.agent_api.ask_agent',
-			args: { message: text },
+			args: { message: text, conversation: currentConversation },
 			callback: (res) => {
 				handleResponse(res);
 				$send.prop('disabled', false);
 			},
-
 			error: () => {
 				removeTypingIndicator();
 				resetStreamState();
@@ -177,4 +290,7 @@ frappe.pages['copilot_chat'].on_page_load = function(wrapper) {
 	$input.on('keydown', (e) => {
 		if (e.key === 'Enter') sendMessage();
 	});
+
+	// initial load
+	refreshConvoList();
 };
