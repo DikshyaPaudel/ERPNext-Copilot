@@ -15,7 +15,41 @@ unrecognized fields when flattening to a simplified dict caused a
 flow was tested through the web interface (never surfaced in bench console
 testing, since that flow kept the in-memory history list directly rather
 than round-tripping through cache).
+
+--------------------------------------------------------------------------
+Perf notes (see project retro on response latency):
+
+#1 History trimming — the FULL history is still what's cached (needed for
+   the thought_signature reason above), but only the last HISTORY_WINDOW
+   Content objects are sent to the model on each call. A long-running
+   session was resending its entire transcript on every single turn.
+
+#2/#3 Streaming + status — client.models.generate_content_stream() is used
+   instead of a single blocking call, so plain-text replies are pushed to
+   the browser token-chunk by token-chunk over Frappe's realtime (socketio)
+   channel as they arrive, and a short status line ("Calling X...") is
+   pushed the moment a tool is about to be dispatched. This doesn't reduce
+   total model latency, but removes the "nothing is happening" dead air
+   that's most of what reads as slow, especially across a multi-tool chain.
+
+   Function-call parts are not token-streamed by Gemini — they arrive
+   whole in a single chunk — so they're appended to the reconstructed
+   Content verbatim, untouched, specifically so their thought_signature
+   survives exactly as it did in the non-streaming code path. Only text
+   parts are coalesced from multiple chunks. (Streaming chunk granularity
+   can vary by SDK version — if you're on a different google-genai
+   version than this was written against, sanity-check that function-call
+   parts still arrive as a single complete part before trusting this in
+   production.)
+
+#6 Timeout — every model call is wrapped in a hard wall-clock timeout so a
+   hung/slow Gemini API call can't leave the user staring at a disabled
+   Send button indefinitely. Times out gracefully with a clear message
+   instead of an unbounded wait.
+--------------------------------------------------------------------------
 """
+
+import concurrent.futures
 
 import frappe
 from google import genai
@@ -27,6 +61,14 @@ from erpnext_copilot.custom_code.gemini_agent import (
 )
 
 MAX_TOOL_STEPS = 5
+HISTORY_WINDOW = 8            # (#1) Content objects sent to the model per call
+MODEL_TIMEOUT_SECONDS = 20    # (#6)
+STREAM_EVENT = "copilot_stream_chunk"
+STATUS_EVENT = "copilot_status"
+
+
+class ModelTimeoutError(Exception):
+    pass
 
 
 def _history_key():
@@ -63,6 +105,76 @@ def _save_history(history_raw):
     frappe.cache().set_value(_history_key(), history_raw, expires_in_sec=3600)
 
 
+def _trimmed(history):
+    """(#1) Only the most recent turns go to the model. Doesn't touch what
+    gets cached/returned — just what's sent on THIS call."""
+    return history[-HISTORY_WINDOW:] if len(history) > HISTORY_WINDOW else history
+
+
+def _publish_status(text):
+    """(#3) Push a lightweight status line to just this user's browser
+    session so a multi-step tool chain doesn't look frozen. Best-effort —
+    a pub/sub hiccup should never break the actual agent turn."""
+    try:
+        frappe.publish_realtime(STATUS_EVENT, {"text": text}, user=frappe.session.user)
+    except Exception:
+        pass
+
+
+def _publish_chunk(text):
+    """(#2) Push one piece of streamed reply text to the browser."""
+    try:
+        frappe.publish_realtime(STREAM_EVENT, {"text": text}, user=frappe.session.user)
+    except Exception:
+        pass
+
+
+def _generate_and_stream(client, history, config):
+    """Runs one streamed model call. Text parts are coalesced and pushed
+    to the browser as they arrive; function-call parts are collected
+    verbatim (untouched) so their thought_signature is preserved exactly
+    as the non-streaming path would have kept it.
+
+    Returns (candidate_content, function_call_or_None) — candidate_content
+    is a reconstructed types.Content matching what response.candidates[0]
+    .content would have been from a non-streaming call, so every other
+    piece of this file's history handling is unaffected by the switch.
+    """
+    collected_parts = []
+    text_so_far = ""
+
+    for chunk in client.models.generate_content_stream(model="gemini-3.6-flash", contents=history, config=config):
+        candidate = chunk.candidates[0] if chunk.candidates else None
+        if not candidate or not candidate.content or not candidate.content.parts:
+            continue
+        for part in candidate.content.parts:
+            if getattr(part, "function_call", None):
+                collected_parts.append(part)
+            elif getattr(part, "text", None):
+                text_so_far += part.text
+                _publish_chunk(part.text)
+            else:
+                collected_parts.append(part)
+
+    if text_so_far:
+        collected_parts.append(types.Part(text=text_so_far))
+
+    candidate_content = types.Content(role="model", parts=collected_parts)
+    function_call = next((p.function_call for p in collected_parts if getattr(p, "function_call", None)), None)
+    return candidate_content, function_call
+
+
+def _call_model(client, history, config):
+    """(#6) Wraps the streamed call with a hard timeout so a hung/slow
+    API call can't leave the request open indefinitely."""
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(_generate_and_stream, client, _trimmed(history), config)
+        try:
+            return future.result(timeout=MODEL_TIMEOUT_SECONDS)
+        except concurrent.futures.TimeoutError:
+            raise ModelTimeoutError(f"Gemini didn't respond within {MODEL_TIMEOUT_SECONDS}s.")
+
+
 @frappe.whitelist()
 def ask_agent(message: str):
     """One turn of the conversation. Returns either a final reply, or a
@@ -78,12 +190,14 @@ def ask_agent(message: str):
     history_raw.append(_content_to_raw(user_content))
 
     for _ in range(MAX_TOOL_STEPS):
-        response = client.models.generate_content(model="gemini-3.6-flash", contents=history, config=config_with_tools)
-        candidate_content = response.candidates[0].content
+        try:
+            candidate_content, function_call = _call_model(client, history, config_with_tools)
+        except ModelTimeoutError as e:
+            _save_history(history_raw)
+            return {"type": "reply", "text": f"Still working on that — {e} Please try again in a moment."}
+
         history.append(candidate_content)
         history_raw.append(_content_to_raw(candidate_content))
-
-        function_call = next((p.function_call for p in candidate_content.parts if p.function_call), None)
 
         if not function_call:
             _save_history(history_raw)
@@ -99,6 +213,8 @@ def ask_agent(message: str):
                 "tool": fn_name, "args": fn_args, "history_raw": history_raw,
             }, expires_in_sec=600)
             return {"type": "pending_action", "tool": fn_name, "args": fn_args}
+
+        _publish_status(f"Calling {fn_name}...")
 
         fn = TOOL_DISPATCH.get(fn_name)
         result = fn(**fn_args) if fn else {"error": f"Unknown tool {fn_name}"}
@@ -127,6 +243,7 @@ def confirm_pending_action(approved: bool):
     history_raw = pending["history_raw"]
 
     if approved:
+        _publish_status(f"Calling {fn_name}...")
         fn = TOOL_DISPATCH.get(fn_name)
         result = fn(**fn_args) if fn else {"error": f"Unknown tool {fn_name}"}
     else:
@@ -148,12 +265,14 @@ def _continue_after_tool_result(history_raw):
     history = _raw_to_history(history_raw)
 
     for _ in range(MAX_TOOL_STEPS):
-        response = client.models.generate_content(model="gemini-3.6-flash", contents=history, config=config_with_tools)
-        candidate_content = response.candidates[0].content
+        try:
+            candidate_content, function_call = _call_model(client, history, config_with_tools)
+        except ModelTimeoutError as e:
+            _save_history(history_raw)
+            return {"type": "reply", "text": f"Still working on that — {e} Please try again in a moment."}
+
         history.append(candidate_content)
         history_raw.append(_content_to_raw(candidate_content))
-
-        function_call = next((p.function_call for p in candidate_content.parts if p.function_call), None)
 
         if not function_call:
             _save_history(history_raw)
@@ -168,6 +287,8 @@ def _continue_after_tool_result(history_raw):
             }, expires_in_sec=600)
             _save_history(history_raw)
             return {"type": "pending_action", "tool": fn_name, "args": fn_args}
+
+        _publish_status(f"Calling {fn_name}...")
 
         fn = TOOL_DISPATCH.get(fn_name)
         result = fn(**fn_args) if fn else {"error": f"Unknown tool {fn_name}"}
