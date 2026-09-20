@@ -17,6 +17,49 @@ VALID_FIELDTYPES = {
     "Link", "Check", "Text", "Small Text", "Long Text", "Attach",
 }
 
+# Frappe already caches frappe.get_meta() for the lifetime of a single HTTP
+# request (frappe.local.meta_cache), so repeated calls within one agent turn
+# were already cheap. What wasn't cached is the same doctype being checked
+# again on a LATER turn — a fresh request — which re-triggers a full meta
+# load. This cache closes that gap with a short TTL (schema changes are rare
+# enough that a 3-minute staleness window is an acceptable trade for fewer
+# meta loads across a session).
+_DEFAULT_DOCFIELDS = {"name", "owner", "creation", "modified", "modified_by", "docstatus", "idx"}
+_META_CACHE_TTL = 180
+
+
+def _cached_doctype_fieldnames(doctype: str) -> set:
+    """All real field names on a DocType, plus Frappe's standard default
+    fields, cached briefly. Used anywhere the code previously called
+    meta.has_field(x) just to check presence."""
+    cache_key = f"erpnext_copilot_fields:{doctype}"
+    cached = frappe.cache().get_value(cache_key)
+    if cached is not None:
+        return set(cached)
+
+    meta = frappe.get_meta(doctype)
+    fieldnames = {f.fieldname for f in meta.fields} | _DEFAULT_DOCFIELDS
+    frappe.cache().set_value(cache_key, list(fieldnames), expires_in_sec=_META_CACHE_TTL)
+    return fieldnames
+
+
+def _has_field_cached(doctype: str, fieldname: str) -> bool:
+    return fieldname in _cached_doctype_fieldnames(doctype)
+
+
+def _cached_list_view_fieldnames(doctype: str) -> list:
+    """Fieldnames flagged in_list_view, cached briefly — used to build a
+    default column set when the agent doesn't specify which fields it wants."""
+    cache_key = f"erpnext_copilot_list_fields:{doctype}"
+    cached = frappe.cache().get_value(cache_key)
+    if cached is not None:
+        return cached
+
+    meta = frappe.get_meta(doctype)
+    fieldnames = [f.fieldname for f in meta.fields if f.in_list_view]
+    frappe.cache().set_value(cache_key, fieldnames, expires_in_sec=_META_CACHE_TTL)
+    return fieldnames
+
 
 # ---------------------------------------------------------------------------
 # Reads
@@ -62,10 +105,10 @@ def aggregate_documents(doctype: str, group_by: str, days: Optional[int] = None,
     if not frappe.db.exists("DocType", doctype):
         return {"error": f"'{doctype}' is not a valid DocType."}
 
-    meta = frappe.get_meta(doctype)
-    if not meta.has_field(group_by):
+    fieldnames = _cached_doctype_fieldnames(doctype)
+    if group_by not in fieldnames:
         return {"error": f"'{group_by}' is not a valid field on {doctype}."}
-    if days and not meta.has_field(date_field):
+    if days and date_field not in fieldnames:
         return {"error": f"'{date_field}' is not a valid field on {doctype}."}
 
     conditions = []
@@ -77,14 +120,14 @@ def aggregate_documents(doctype: str, group_by: str, days: Optional[int] = None,
         conditions.append(f"`{date_field}` >= %s")
         values.append(cutoff)
 
-    if meta.has_field("docstatus"):
+    if "docstatus" in fieldnames:
         conditions.append("docstatus != 2")
 
     where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
 
     total_field = None
     for candidate in ("grand_total", "total", "amount"):
-        if meta.has_field(candidate):
+        if candidate in fieldnames:
             total_field = candidate
             break
 
@@ -439,7 +482,7 @@ def create_dashboard_chart(
     """
     if not frappe.db.exists("DocType", document_type):
         return {"error": f"'{document_type}' is not a valid DocType."}
-    if not frappe.get_meta(document_type).has_field(group_by_based_on):
+    if not _has_field_cached(document_type, group_by_based_on):
         return {"error": f"'{group_by_based_on}' is not a valid field on {document_type}."}
     if frappe.db.exists("Dashboard Chart", chart_name):
         return {"error": f"A Dashboard Chart named '{chart_name}' already exists."}
@@ -486,18 +529,16 @@ def search_documents(doctype: str, filters: Optional[dict] = None, fields: Optio
     if not frappe.db.exists("DocType", doctype):
         return {"error": f"'{doctype}' is not a valid DocType."}
 
-    meta = frappe.get_meta(doctype)
-
     if fields:
-        bad_fields = [f for f in fields if f != "name" and not meta.has_field(f)]
+        bad_fields = [f for f in fields if f != "name" and not _has_field_cached(doctype, f)]
         if bad_fields:
             return {"error": f"Invalid fields for {doctype}: {bad_fields}"}
     else:
-        fields = ["name"] + [f.fieldname for f in meta.fields if f.in_list_view][:6]
+        fields = ["name"] + _cached_list_view_fieldnames(doctype)[:6]
 
     if filters:
         for key in filters:
-            if not meta.has_field(key) and key != "name":
+            if not _has_field_cached(doctype, key) and key != "name":
                 return {"error": f"'{key}' is not a valid field on {doctype}."}
 
     results = frappe.get_all(doctype, filters=filters or {}, fields=fields, limit=limit)
