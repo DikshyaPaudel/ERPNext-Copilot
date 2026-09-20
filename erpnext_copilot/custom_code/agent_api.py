@@ -50,6 +50,8 @@ Perf notes (see project retro on response latency):
 """
 
 import concurrent.futures
+import json
+from typing import Optional
 
 import frappe
 from google import genai
@@ -65,14 +67,11 @@ HISTORY_WINDOW = 8            # (#1) Content objects sent to the model per call
 MODEL_TIMEOUT_SECONDS = 20    # (#6)
 STREAM_EVENT = "copilot_stream_chunk"
 STATUS_EVENT = "copilot_status"
+TITLE_MAX_CHARS = 40
 
 
 class ModelTimeoutError(Exception):
     pass
-
-
-def _history_key():
-    return f"erpnext_copilot_history:{frappe.session.user}"
 
 
 def _pending_key():
@@ -101,8 +100,134 @@ def _raw_to_history(raw):
     return history
 
 
-def _save_history(history_raw):
-    frappe.cache().set_value(_history_key(), history_raw, expires_in_sec=3600)
+# ---------------------------------------------------------------------------
+# Conversation persistence — one Copilot Conversation doc per thread, scoped
+# to the owning user by the doctype's own if_owner permission. Replaces the
+# single per-user Redis blob the earlier version kept (that only ever held
+# ONE conversation and expired after an hour — no way to have more than one
+# thread, or come back to an older one, which is what a sidebar needs).
+# ---------------------------------------------------------------------------
+
+def _new_conversation_doc():
+    doc = frappe.get_doc({
+        "doctype": "Copilot Conversation",
+        "title": "New chat",
+        "history_json": "[]",
+    })
+    doc.insert()
+    return doc
+
+
+def _load_conversation(name):
+    """Frappe's if_owner permission enforces that this raises
+    frappe.PermissionError for a conversation the caller doesn't own —
+    no manual ownership check needed here."""
+    return frappe.get_doc("Copilot Conversation", name)
+
+
+def _save_conversation(doc, history_raw, set_title_from=None):
+    doc.history_json = json.dumps(history_raw)
+    doc.last_message_at = frappe.utils.now_datetime()
+    if set_title_from and doc.title in (None, "", "New chat"):
+        stripped = set_title_from.strip()
+        doc.title = (stripped[:TITLE_MAX_CHARS] + "…") if len(stripped) > TITLE_MAX_CHARS else stripped
+    doc.save()
+
+
+def _transcript_from_raw(history_raw):
+    """Reduce the raw Gemini Content/Part history — which also contains
+    internal function_call / function_response turns — down to just what
+    the user actually saw: their own messages and the agent's text
+    replies. Used to redraw the chat when the sidebar switches threads."""
+    transcript = []
+    for item in history_raw:
+        role = item.get("role")
+        parts = item.get("parts", [])
+        text = "".join(p.get("text", "") for p in parts if p.get("text"))
+        if not text:
+            continue  # function_call / function_response turns carry no plain text
+        if role == "user":
+            transcript.append({"sender": "user", "text": text})
+        elif role == "model":
+            transcript.append({"sender": "agent", "text": text})
+    return transcript
+
+
+@frappe.whitelist()
+def list_conversations():
+    """Sidebar list — current user's own conversations, most recent first."""
+    return frappe.get_all(
+        "Copilot Conversation",
+        filters={"owner": frappe.session.user},
+        fields=["name", "title", "last_message_at"],
+        order_by="last_message_at desc",
+        limit=100,
+    )
+
+
+@frappe.whitelist()
+def new_conversation():
+    doc = _new_conversation_doc()
+    return {"name": doc.name, "title": doc.title}
+
+
+@frappe.whitelist()
+def get_conversation(name: str):
+    """Loads one thread for the sidebar to redraw in the main panel."""
+    doc = _load_conversation(name)
+    history_raw = json.loads(doc.history_json or "[]")
+    return {"name": doc.name, "title": doc.title, "messages": _transcript_from_raw(history_raw)}
+
+
+@frappe.whitelist()
+def delete_conversation(name: str):
+    frappe.delete_doc("Copilot Conversation", name)
+    return {"success": True}
+
+
+# ---------------------------------------------------------------------------
+# Tool-call audit log — one Copilot Tool Call record per WRITE_TOOLS
+# invocation. Logged as "Awaiting Confirmation" the moment the model
+# proposes it, then resolved to Success/Error/Cancelled once the user
+# decides and the tool actually runs. This exists independently of
+# conversation history (which a user can delete) so there's a permanent
+# record of who told the agent to change data, with what arguments, and
+# what actually happened — the first thing anyone auditing an ERP system
+# will ask for.
+# ---------------------------------------------------------------------------
+
+def _log_tool_call_pending(conversation_name, fn_name, fn_args):
+    log = frappe.get_doc({
+        "doctype": "Copilot Tool Call",
+        "conversation": conversation_name,
+        "tool_name": fn_name,
+        "arguments": json.dumps(fn_args, default=str),
+        "status": "Awaiting Confirmation",
+        "requires_confirmation": 1,
+        "started_at": frappe.utils.now_datetime(),
+    })
+    log.insert()
+    return log.name
+
+
+def _log_tool_call_resolved(log_name, approved, result):
+    if not log_name:
+        return  # best-effort — a missing log entry shouldn't break the actual tool call
+    try:
+        log = frappe.get_doc("Copilot Tool Call", log_name)
+    except frappe.DoesNotExistError:
+        return
+
+    if not approved:
+        log.status = "Cancelled"
+    elif isinstance(result, dict) and result.get("error"):
+        log.status = "Error"
+    else:
+        log.status = "Success"
+
+    log.result = json.dumps(result, default=str)
+    log.completed_at = frappe.utils.now_datetime()
+    log.save()
 
 
 def _trimmed(history):
@@ -176,13 +301,17 @@ def _call_model(client, history, config):
 
 
 @frappe.whitelist()
-def ask_agent(message: str):
+def ask_agent(message: str, conversation: Optional[str] = None):
     """One turn of the conversation. Returns either a final reply, or a
-    pending_action the frontend must confirm before it's executed."""
+    pending_action the frontend must confirm before it's executed. If no
+    conversation id is given (or it's a brand-new thread), a new
+    Copilot Conversation doc is created and its name is returned so the
+    frontend can pass it back on the next turn."""
     client = _get_client()
     config_with_tools = types.GenerateContentConfig(system_instruction=SYSTEM_INSTRUCTION, tools=[TOOLS])
 
-    history_raw = frappe.cache().get_value(_history_key()) or []
+    doc = _load_conversation(conversation) if conversation else _new_conversation_doc()
+    history_raw = json.loads(doc.history_json or "[]")
     history = _raw_to_history(history_raw)
 
     user_content = types.Content(role="user", parts=[types.Part(text=message)])
@@ -193,15 +322,15 @@ def ask_agent(message: str):
         try:
             candidate_content, function_call = _call_model(client, history, config_with_tools)
         except ModelTimeoutError as e:
-            _save_history(history_raw)
-            return {"type": "reply", "text": f"Still working on that — {e} Please try again in a moment."}
+            _save_conversation(doc, history_raw, set_title_from=message)
+            return {"type": "reply", "text": f"Still working on that — {e} Please try again in a moment.", "conversation": doc.name}
 
         history.append(candidate_content)
         history_raw.append(_content_to_raw(candidate_content))
 
         if not function_call:
-            _save_history(history_raw)
-            return {"type": "reply", "text": _extract_text(candidate_content)}
+            _save_conversation(doc, history_raw, set_title_from=message)
+            return {"type": "reply", "text": _extract_text(candidate_content), "conversation": doc.name}
 
         fn_name = function_call.name
         fn_args = dict(function_call.args)
@@ -209,10 +338,13 @@ def ask_agent(message: str):
         if fn_name in WRITE_TOOLS:
             # Stop here — don't execute yet. Store enough state to resume
             # after the frontend gets user confirmation.
+            log_name = _log_tool_call_pending(doc.name, fn_name, fn_args)
             frappe.cache().set_value(_pending_key(), {
-                "tool": fn_name, "args": fn_args, "history_raw": history_raw,
+                "tool": fn_name, "args": fn_args, "history_raw": history_raw, "conversation": doc.name,
+                "tool_call_log": log_name,
             }, expires_in_sec=600)
-            return {"type": "pending_action", "tool": fn_name, "args": fn_args}
+            _save_conversation(doc, history_raw, set_title_from=message)
+            return {"type": "pending_action", "tool": fn_name, "args": fn_args, "conversation": doc.name}
 
         _publish_status(f"Calling {fn_name}...")
 
@@ -224,8 +356,8 @@ def ask_agent(message: str):
         history.append(fn_response_content)
         history_raw.append(_content_to_raw(fn_response_content))
 
-    _save_history(history_raw)
-    return {"type": "reply", "text": "(stopped after reaching the tool-call safety limit)"}
+    _save_conversation(doc, history_raw, set_title_from=message)
+    return {"type": "reply", "text": "(stopped after reaching the tool-call safety limit)", "conversation": doc.name}
 
 
 @frappe.whitelist()
@@ -241,6 +373,7 @@ def confirm_pending_action(approved: bool):
     fn_name = pending["tool"]
     fn_args = pending["args"]
     history_raw = pending["history_raw"]
+    doc = _load_conversation(pending["conversation"])
 
     if approved:
         _publish_status(f"Calling {fn_name}...")
@@ -249,15 +382,17 @@ def confirm_pending_action(approved: bool):
     else:
         result = {"cancelled": True, "message": "Action cancelled by user."}
 
+    _log_tool_call_resolved(pending.get("tool_call_log"), approved, result)
+
     clean_result = _sanitize_tool_result(result)
     fn_response_content = types.Content(role="user", parts=[types.Part.from_function_response(name=fn_name, response={"result": clean_result})])
     history_raw.append(_content_to_raw(fn_response_content))
-    _save_history(history_raw)  # save first, so this result is in place before we continue the conversation
+    _save_conversation(doc, history_raw)  # save first, so this result is in place before we continue the conversation
 
-    return _continue_after_tool_result(history_raw)
+    return _continue_after_tool_result(doc, history_raw)
 
 
-def _continue_after_tool_result(history_raw):
+def _continue_after_tool_result(doc, history_raw):
     """Lets the model produce a natural-language summary of a tool result
     (or chain into another tool call, e.g. list_dashboards right after creating a chart)."""
     client = _get_client()
@@ -268,25 +403,27 @@ def _continue_after_tool_result(history_raw):
         try:
             candidate_content, function_call = _call_model(client, history, config_with_tools)
         except ModelTimeoutError as e:
-            _save_history(history_raw)
-            return {"type": "reply", "text": f"Still working on that — {e} Please try again in a moment."}
+            _save_conversation(doc, history_raw)
+            return {"type": "reply", "text": f"Still working on that — {e} Please try again in a moment.", "conversation": doc.name}
 
         history.append(candidate_content)
         history_raw.append(_content_to_raw(candidate_content))
 
         if not function_call:
-            _save_history(history_raw)
-            return {"type": "reply", "text": _extract_text(candidate_content)}
+            _save_conversation(doc, history_raw)
+            return {"type": "reply", "text": _extract_text(candidate_content), "conversation": doc.name}
 
         fn_name = function_call.name
         fn_args = dict(function_call.args)
 
         if fn_name in WRITE_TOOLS:
+            log_name = _log_tool_call_pending(doc.name, fn_name, fn_args)
             frappe.cache().set_value(_pending_key(), {
-                "tool": fn_name, "args": fn_args, "history_raw": history_raw,
+                "tool": fn_name, "args": fn_args, "history_raw": history_raw, "conversation": doc.name,
+                "tool_call_log": log_name,
             }, expires_in_sec=600)
-            _save_history(history_raw)
-            return {"type": "pending_action", "tool": fn_name, "args": fn_args}
+            _save_conversation(doc, history_raw)
+            return {"type": "pending_action", "tool": fn_name, "args": fn_args, "conversation": doc.name}
 
         _publish_status(f"Calling {fn_name}...")
 
@@ -301,12 +438,28 @@ def _continue_after_tool_result(history_raw):
         history.append(fn_response_content)
         history_raw.append(_content_to_raw(fn_response_content))
 
-    _save_history(history_raw)
-    return {"type": "reply", "text": "(stopped after reaching the tool-call safety limit)"}
+    _save_conversation(doc, history_raw)
+    return {"type": "reply", "text": "(stopped after reaching the tool-call safety limit)", "conversation": doc.name}
+
+
+@frappe.whitelist()
+def get_tool_calls(conversation: str):
+    """Audit trail for one conversation — every write tool the agent
+    proposed, whether it was confirmed or cancelled, and what happened.
+    if_owner permission on Copilot Tool Call means this naturally only
+    returns the calling user's own records."""
+    return frappe.get_all(
+        "Copilot Tool Call",
+        filters={"conversation": conversation},
+        fields=["name", "tool_name", "status", "arguments", "result", "started_at", "completed_at"],
+        order_by="creation asc",
+    )
 
 
 @frappe.whitelist()
 def reset_conversation():
-    frappe.cache().delete_value(_history_key())
+    """Kept for backward compatibility — clears any pending write
+    confirmation for the current user. Starting a fresh thread is now
+    done via new_conversation(), which the sidebar's '+ New chat' calls."""
     frappe.cache().delete_value(_pending_key())
     return {"success": True}
