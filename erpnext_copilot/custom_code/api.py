@@ -267,6 +267,9 @@ Output strictly valid JSON with no markdown formatting or text wrappers, matchin
 def import_data_to_doctype(target_doctype: str, records: list):
     """Import a list of cleaned records into an ERPNext DocType.
     Creates documents using frappe.get_doc and commits to database.
+    Runs with the calling user's real permissions (no ignore_permissions),
+    so rows the user isn't allowed to create come back as per-row errors
+    rather than silently succeeding.
     """
     if not frappe.db.exists("DocType", target_doctype):
         return {"error": f"Target DocType '{target_doctype}' does not exist."}
@@ -285,14 +288,17 @@ def import_data_to_doctype(target_doctype: str, records: list):
             doc.insert()
             created.append(doc.name)
         except frappe.PermissionError:
-            errors.append(f"Row {idx + 1}: permission denied - You dont have create access to {target_doctype}.")
+            errors.append(f"Row {idx + 1}: permission denied - you don't have create access to {target_doctype}.")
         except Exception as e:
             errors.append(f"Row {idx + 1}: {str(e)}")
 
     frappe.db.commit()
 
+    # success only reflects what actually happened — at least one row
+    # created and no total wipeout — so the agent can't report a fully
+    # failed import as a success.
     return {
-        "success": True,
+        "success": len(created) > 0,
         "target_doctype": target_doctype,
         "created_count": len(created),
         "created_names": created,
@@ -337,7 +343,7 @@ def create_doctype(doctype_name: str, fields: list, module: str = "Custom"):
     try:
         doc.insert()
     except frappe.PermissionError:
-        return {"error": "You dont have permission to create new Doctype. This usually requires the System Manager role."}
+        return {"error": "You don't have permission to create a new DocType. This usually requires the System Manager role."}
     return {"success": True, "doctype": doctype_name, "fields_created": [f["fieldname"] for f in fields]}
 
 
@@ -352,6 +358,13 @@ def list_dashboards():
 def add_chart_to_dashboard(chart_name: str, dashboard_name: str):
     """Add an existing Dashboard Chart to a Dashboard by adding a link row in
     the Dashboard's `charts` child table.
+
+    Both mutations go through frappe.get_doc(...).save()/.insert() rather
+    than frappe.db.set_value(), because db.set_value() is a raw DB write
+    that skips has_permission() checks entirely — using it here would let
+    a user with no write access to Dashboard Chart / Dashboard silently
+    modify them, the same class of bug this file's other writes were
+    already fixed for.
     """
     real_chart = chart_name
     if not frappe.db.exists("Dashboard Chart", real_chart):
@@ -369,12 +382,15 @@ def add_chart_to_dashboard(chart_name: str, dashboard_name: str):
         else:
             return {"error": f"Dashboard '{dashboard_name}' does not exist in Frappe."}
 
-    try:
-    # Ensure the Dashboard Chart is marked as standard so standard Dashboards can render it
-        frappe.db.set_value("Dashboard Chart", real_chart, "is_standard", 1)
-    except frappe.PermissionError:
-        return {"error":"You dont have permission to modify this Dashboard Chart."}
-
+    # NOTE: earlier versions of this function flipped is_standard=1 on the
+    # chart here (first via an unchecked frappe.db.set_value(), later via a
+    # permission-checked .save()). Both were wrong: is_standard tells Frappe
+    # the chart is fixture code backed by a module on disk, and a chart
+    # created dynamically through frappe.get_doc().insert() has no such
+    # module — flipping the flag causes "Module None not found" the next
+    # time the chart is resolved/rendered. Non-standard charts attach to a
+    # Dashboard and render fine via the Dashboard Chart Link below, so this
+    # step is simply not needed.
     dashboard = frappe.get_doc("Dashboard", real_dashboard)
 
     # Check if already added
@@ -398,7 +414,7 @@ def add_chart_to_dashboard(chart_name: str, dashboard_name: str):
     try:
         chart_link.insert()
     except frappe.PermissionError:
-        return {"error":"You dont have permission to modify this Dashboard."}
+        return {"error": "You don't have permission to modify this Dashboard."}
     frappe.db.commit()
 
     return {
@@ -440,13 +456,12 @@ def create_dashboard_chart(
         "time_interval": "Monthly",
         "filters_json": "{}",   # required by ERPNext even when there are no filters
         "is_public": 1,
-        "is_standard": 1,
     })
     try:
         doc.insert()
         frappe.db.commit()
     except frappe.PermissionError:
-        return {"error":"You dont have permission to create Dashboard Charts."}
+        return {"error": "You don't have permission to create Dashboard Charts."}
 
     added_to_dashboard_msg = ""
     if dashboard_name:
