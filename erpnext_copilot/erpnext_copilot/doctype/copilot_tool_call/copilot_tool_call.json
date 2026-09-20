@@ -1,0 +1,76 @@
+{
+ "doctype": "DocType",
+ "name": "Copilot Tool Call",
+ "module": "Erpnext Copilot",
+ "custom": 0,
+ "autoname": "hash",
+ "engine": "InnoDB",
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "fields": [
+  {
+   "fieldname": "conversation",
+   "fieldtype": "Link",
+   "options": "Copilot Conversation",
+   "label": "Conversation",
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "tool_name",
+   "fieldtype": "Data",
+   "label": "Tool",
+   "reqd": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "options": "Awaiting Confirmation\nSuccess\nError\nCancelled",
+   "default": "Awaiting Confirmation",
+   "label": "Status",
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "requires_confirmation",
+   "fieldtype": "Check",
+   "label": "Required Confirmation",
+   "default": "1"
+  },
+  {
+   "fieldname": "arguments",
+   "fieldtype": "Long Text",
+   "label": "Arguments (JSON)",
+   "description": "Immutable once logged — the controller blocks edits to this field after creation, so the audit record can't be altered after the fact."
+  },
+  {
+   "fieldname": "result",
+   "fieldtype": "Long Text",
+   "label": "Result (JSON)",
+   "description": "Filled in once the tool call resolves — the actual tool result, or a cancellation notice."
+  },
+  {
+   "fieldname": "started_at",
+   "fieldtype": "Datetime",
+   "label": "Started at",
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "completed_at",
+   "fieldtype": "Datetime",
+   "label": "Completed at"
+  }
+ ],
+ "permissions": [
+  {
+   "role": "All",
+   "if_owner": 1,
+   "read": 1,
+   "write": 1,
+   "create": 1
+  },
+  {
+   "role": "System Manager",
+   "read": 1
+  }
+ ]
+}
