@@ -20,9 +20,11 @@ than round-tripping through cache).
 Perf notes (see project retro on response latency):
 
 #1 History trimming — the FULL history is still what's cached (needed for
-   the thought_signature reason above), but only the last HISTORY_WINDOW
-   Content objects are sent to the model on each call. A long-running
-   session was resending its entire transcript on every single turn.
+   the thought_signature reason above), but only the last HISTORY_TURNS
+   genuine user turns (and everything chained after each of them —
+   tool calls, tool responses) are sent to the model on each call. See
+   _trimmed() for why this has to cut at turn boundaries, not a fixed
+   Content-object count.
 
 #2/#3 Streaming + status — client.models.generate_content_stream() is used
    instead of a single blocking call, so plain-text replies are pushed to
@@ -63,7 +65,7 @@ from erpnext_copilot.custom_code.gemini_agent import (
 )
 
 MAX_TOOL_STEPS = 5
-HISTORY_WINDOW = 8            # (#1) Content objects sent to the model per call
+HISTORY_TURNS = 8             # (#1) genuine user turns kept per model call — see _trimmed()
 MODEL_TIMEOUT_SECONDS = 20    # (#6)
 STREAM_EVENT = "copilot_stream_chunk"
 STATUS_EVENT = "copilot_status"
@@ -231,9 +233,38 @@ def _log_tool_call_resolved(log_name, approved, result):
 
 
 def _trimmed(history):
-    """(#1) Only the most recent turns go to the model. Doesn't touch what
-    gets cached/returned — just what's sent on THIS call."""
-    return history[-HISTORY_WINDOW:] if len(history) > HISTORY_WINDOW else history
+    """(#1) Trim to the last HISTORY_TURNS genuine user turns and
+    everything after them.
+
+    NOT a fixed Content-object-count slice — that was the original
+    version of this function, and it caused a real bug: Gemini requires
+    a model turn containing a function_call to be immediately preceded,
+    in whatever's actually sent, by a genuine user turn or a
+    function-response turn. A tool-calling chain (user -> model calls
+    tool A -> function response -> model calls tool B -> ...) has to
+    stay intact; slicing by raw count can land the cut in the middle of
+    that chain and strip off the turn Gemini expects to see right before
+    a function_call, which is exactly what produced the
+    400 INVALID_ARGUMENT "function call turn comes immediately after a
+    user turn or after a function response turn" error.
+
+    A function-response Content also has role == "user" (see
+    types.Part.from_function_response usage below) but isn't a genuine
+    turn boundary — only a Content whose parts contain neither a
+    function_call nor a function_response is. Those are the only safe
+    places to cut.
+    """
+    boundaries = [
+        i for i, c in enumerate(history)
+        if c.role == "user" and not any(
+            getattr(p, "function_call", None) or getattr(p, "function_response", None)
+            for p in c.parts
+        )
+    ]
+    if len(boundaries) <= HISTORY_TURNS:
+        return history
+    start = boundaries[-HISTORY_TURNS]
+    return history[start:]
 
 
 def _publish_status(text):
