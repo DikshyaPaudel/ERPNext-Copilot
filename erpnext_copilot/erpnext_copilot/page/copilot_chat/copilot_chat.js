@@ -46,6 +46,35 @@ frappe.pages['copilot_chat'].on_page_load = function(wrapper) {
 					flex-shrink: 0;
 				}
 				.copilot-convo-item:hover .copilot-convo-delete { opacity: 1; }
+
+				/* Markdown rendered inside agent replies — tables especially,
+				   since the model frequently returns them for list-style data. */
+				.agent-bubble table {
+					border-collapse: collapse;
+					margin: 6px 0;
+					font-size: 13px;
+				}
+				.agent-bubble th, .agent-bubble td {
+					border: 1px solid var(--border-color);
+					padding: 4px 10px;
+					text-align: left;
+				}
+				.agent-bubble th { background: var(--bg-light-gray, var(--bg-gray)); }
+				.agent-bubble .table-wrap { overflow-x: auto; }
+				.agent-bubble p { margin: 4px 0; }
+				.agent-bubble ul, .agent-bubble ol { margin: 4px 0; padding-left: 20px; }
+				.agent-bubble code {
+					background: var(--bg-light-gray, var(--bg-gray));
+					padding: 1px 4px;
+					border-radius: 3px;
+					font-size: 90%;
+				}
+				.agent-bubble pre {
+					background: var(--bg-light-gray, var(--bg-gray));
+					padding: 8px;
+					border-radius: 6px;
+					overflow-x: auto;
+				}
 			</style>
 		`);
 	}
@@ -76,15 +105,58 @@ frappe.pages['copilot_chat'].on_page_load = function(wrapper) {
 	let currentConversation = null;   // name of the Copilot Conversation doc, or null until the first message
 	let $currentAgentBubble = null;   // (#2) accumulates streamed text chunks live
 	let streamedAnyText = false;
+	let streamedRawText = '';         // raw markdown accumulated during streaming, re-rendered once the reply completes
+
+	/**
+	 * Converts the agent's raw reply text (which often contains markdown —
+	 * tables for list-style data especially) into HTML.
+	 *
+	 * The text is HTML-escaped BEFORE being handed to the markdown
+	 * converter. This isn't redundant with the converter's own output: it
+	 * neutralizes any literal "<", ">" or "&" the model's text might
+	 * contain (accidental or adversarial — the model's output is not
+	 * fully trusted input) so it can never be interpreted as a real tag,
+	 * while leaving markdown syntax characters (*, |, #, -) untouched, so
+	 * frappe.markdown still recognizes them and builds real <table>,
+	 * <strong>, <li> etc. elements from them.
+	 *
+	 * Uses frappe.markdown() (Showdown-based, already bundled with the
+	 * framework) rather than pulling in a separate markdown library —
+	 * worth confirming it's present on whatever Frappe version you're
+	 * running before relying on it in a live demo; the fallback below
+	 * degrades to plain text with line breaks if it isn't.
+	 */
+	function renderAgentMarkdown(rawText) {
+		const escaped = frappe.utils.escape_html(rawText);
+		try {
+			if (frappe && typeof frappe.markdown === 'function') {
+				const html = frappe.markdown(escaped);
+				// wrap tables so wide ones scroll horizontally instead of
+				// blowing out the bubble/page width
+				return html.replace(/<table>/g, '<div class="table-wrap"><table>').replace(/<\/table>/g, '</table></div>');
+			}
+		} catch (e) {
+			// fall through to plain-text fallback below
+		}
+		return escaped.replace(/\n/g, '<br>');
+	}
 
 	function addMessage(text, sender) {
 		const align = sender === 'user' ? 'right' : 'left';
 		const bg = sender === 'user' ? 'var(--bg-blue)' : 'var(--bg-gray)';
-		$messages.append(`
-			<div style="text-align: ${align}; margin-bottom: 10px;">
-				<span style="display: inline-block; background: ${bg}; padding: 8px 12px; border-radius: 8px; max-width: 80%; white-space: pre-wrap;">${frappe.utils.escape_html(text)}</span>
-			</div>
-		`);
+		if (sender === 'agent') {
+			$messages.append(`
+				<div style="text-align: left; margin-bottom: 10px;">
+					<div class="agent-bubble" style="display: inline-block; background: ${bg}; padding: 8px 12px; border-radius: 8px; max-width: 90%;">${renderAgentMarkdown(text)}</div>
+				</div>
+			`);
+		} else {
+			$messages.append(`
+				<div style="text-align: ${align}; margin-bottom: 10px;">
+					<span style="display: inline-block; background: ${bg}; padding: 8px 12px; border-radius: 8px; max-width: 80%; white-space: pre-wrap;">${frappe.utils.escape_html(text)}</span>
+				</div>
+			`);
+		}
 		$messages.scrollTop($messages[0].scrollHeight);
 	}
 
@@ -108,11 +180,12 @@ frappe.pages['copilot_chat'].on_page_load = function(wrapper) {
 		removeTypingIndicator();
 		const $wrap = $(`
 			<div style="text-align: left; margin-bottom: 10px;">
-				<span class="agent-bubble" style="display: inline-block; background: var(--bg-gray); padding: 8px 12px; border-radius: 8px; max-width: 80%; white-space: pre-wrap;"></span>
+				<div class="agent-bubble" style="display: inline-block; background: var(--bg-gray); padding: 8px 12px; border-radius: 8px; max-width: 90%; white-space: pre-wrap;"></div>
 			</div>
 		`).appendTo($messages);
 		$currentAgentBubble = $wrap.find('.agent-bubble');
 		streamedAnyText = false;
+		streamedRawText = '';
 		$messages.scrollTop($messages[0].scrollHeight);
 		return $currentAgentBubble;
 	}
@@ -120,7 +193,13 @@ frappe.pages['copilot_chat'].on_page_load = function(wrapper) {
 	function appendToAgentBubble(text) {
 		removeTypingIndicator();
 		if (!$currentAgentBubble) startAgentBubble();
-		$currentAgentBubble.text($currentAgentBubble.text() + text);
+		// Shown as growing plain text WHILE streaming (re-parsing partial
+		// markdown — e.g. an unclosed table row — on every chunk would
+		// flicker/break mid-stream). Once the reply is complete,
+		// handleResponse() swaps this same bubble's content for the fully
+		// rendered markdown version.
+		streamedRawText += text;
+		$currentAgentBubble.text(streamedRawText);
 		streamedAnyText = true;
 		$messages.scrollTop($messages[0].scrollHeight);
 	}
@@ -141,6 +220,7 @@ frappe.pages['copilot_chat'].on_page_load = function(wrapper) {
 	function resetStreamState() {
 		$currentAgentBubble = null;
 		streamedAnyText = false;
+		streamedRawText = '';
 	}
 
 	// --- sidebar ----------------------------------------------------------
@@ -235,7 +315,12 @@ frappe.pages['copilot_chat'].on_page_load = function(wrapper) {
 		if (data.conversation) currentConversation = data.conversation;
 
 		if (data.type === 'reply') {
-			if (!streamedAnyText) {
+			if (streamedAnyText && $currentAgentBubble) {
+				// Streaming showed growing plain text live — now that the
+				// full reply is in, replace it with the properly rendered
+				// markdown (tables, bold, lists) in one swap.
+				$currentAgentBubble.css('white-space', 'normal').html(renderAgentMarkdown(streamedRawText));
+			} else if (!streamedAnyText) {
 				addMessage(data.text, 'agent');
 			}
 			resetStreamState();
