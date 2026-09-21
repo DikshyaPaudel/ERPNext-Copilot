@@ -1,55 +1,51 @@
 {
- "actions": [],
- "allow_rename": 1,
- "autoname": "hash",
- "creation": "2026-09-20 16:45:16.111059",
  "doctype": "DocType",
- "editable_grid": 1,
+ "name": "Copilot Conversation",
+ "module": "Erpnext Copilot",
+ "custom": 0,
+ "autoname": "hash",
  "engine": "InnoDB",
- "field_order": [
-  "title",
-  "history_json",
-  "last_message_at"
- ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
  "fields": [
   {
    "fieldname": "title",
    "fieldtype": "Data",
-   "label": "Title"
+   "label": "Title",
+   "in_list_view": 1,
+   "default": "New chat"
   },
   {
    "fieldname": "history_json",
    "fieldtype": "Long Text",
-   "label": "History (JSON)"
+   "label": "History (JSON)",
+   "description": "Full serialized Gemini Content/Part history for this conversation, same shape agent_api.py already caches — including thought_signature on function-call parts."
   },
   {
    "fieldname": "last_message_at",
    "fieldtype": "Datetime",
-   "label": "Last message at"
+   "label": "Last message at",
+   "in_list_view": 1
   }
  ],
- "index_web_pages_for_search": 1,
- "links": [],
- "modified": "2026-09-20 16:53:31.866230",
- "modified_by": "Administrator",
- "module": "Erpnext Copilot",
- "name": "Copilot Conversation",
- "owner": "Administrator",
  "permissions": [
   {
-   "create": 1,
-   "delete": 1,
-   "email": 1,
-   "export": 1,
-   "print": 1,
+   "role": "All",
+   "create": 1
+  },
+  {
+   "role": "All",
+   "if_owner": 1,
    "read": 1,
-   "report": 1,
+   "write": 1,
+   "delete": 1
+  },
+  {
    "role": "System Manager",
-   "share": 1,
-   "write": 1
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "delete": 1
   }
- ],
- "sort_field": "modified",
- "sort_order": "DESC",
- "states": []
+ ]
 }
