@@ -29,6 +29,13 @@ before it does it.
 
 ![Browser confirmation dialog before creating a DocType](docs/screenshots/confirm.png)
 ![Successful creation](docs/screenshots/4th.png)
+
+![Chat interface asking about chart generation](docs/screenshots/5th.png)
+![Confirmation dialog before chart generation](docs/screenshots/6th.png)
+
+![](docs/screenshots/7th.png)
+![Successful creation](docs/screenshots/8th.png)
+
 ## Quick start
 
 ```bash
