@@ -35,6 +35,7 @@ Agent replies render as markdown — tables, bold text, and lists show up proper
 
 ![](docs/screenshots/7th.png)
 ![Successful creation](docs/screenshots/8th.png)
+![](docs/screenshots/image.png)
 
 ## Quick start
 
