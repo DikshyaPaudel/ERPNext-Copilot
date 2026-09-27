@@ -302,6 +302,13 @@ When the user wants a chart or dashboard:
 If you're unsure whether a DocType or field exists, use get_doctype_fields
 to check rather than guessing.
 
+When presenting tabular data (a list of invoices, customers, etc.), format
+it as a proper Markdown table with EVERY row on its own separate line —
+never run multiple rows together on one line. If you're summarizing
+results from more than one tool call in a single reply (e.g. Sales
+Invoices and Purchase Invoices together), format each as its own clearly
+separated table, each row still on its own line.
+
 Report results in plain language, but only ever report what tool results actually
 confirm happened."""
 
@@ -309,88 +316,6 @@ def _sanitize_tool_result(result):
     """Ensure the tool result is JSON-serializable before it goes back to
     Gemini (e.g. dates, Decimal types from frappe.db.sql)."""
     return json.loads(json.dumps(result, default=str))
-
-
-# def run():
-#     gemini_api_key = frappe.conf.get("gemini_api_key")
-#     if not gemini_api_key:
-#         print("No Gemini API key found. Set it with:")
-#         print('  bench --site your-site-name set-config gemini_api_key "your-key"')
-#         return
-
-#     client = genai.Client(api_key=gemini_api_key)
-
-#     config_with_tools = types.GenerateContentConfig(
-#         system_instruction=SYSTEM_INSTRUCTION,
-#         tools=[TOOLS],
-#     )
-#     config_no_tools = types.GenerateContentConfig(
-#         system_instruction=SYSTEM_INSTRUCTION,
-#     )
-
-#     history = []
-
-#     print(f"erpnext_copilot ready, running as user: {frappe.session.user}")
-#     print("Type 'exit' to quit.\n")
-
-#     while True:
-#         try:
-#             user_input = input("You: ").strip()
-#         except (EOFError, KeyboardInterrupt):
-#             break
-#         if user_input.lower() in ("exit", "quit"):
-#             break
-#         if not user_input:
-#             continue
-
-#         history.append(types.Content(role="user", parts=[types.Part(text=user_input)]))
-
-#         response = client.models.generate_content(model="gemini-3.6-flash", contents=history, config=config_with_tools)
-#         candidate_content = response.candidates[0].content
-#         history.append(candidate_content)
-
-#         function_call = None
-#         for part in candidate_content.parts:
-#             if part.function_call:
-#                 function_call = part.function_call
-#                 break
-
-#         if function_call:
-#             fn_name = function_call.name
-#             fn_args = dict(function_call.args)
-#             print(f"[calling tool: {fn_name}({fn_args})]")
-
-#             fn = TOOL_DISPATCH.get(fn_name)
-
-#             if fn_name in WRITE_TOOLS:
-#                 print("\n[PLANNED ACTION]")
-#                 for k, v in fn_args.items():
-#                     print(f"  {k}: {v}")
-#                 proceed = input("\nProceed with this action? (y/n): ").strip().lower()
-#                 if proceed != "y":
-#                     result = {"cancelled": True, "message": "Action cancelled by user."}
-#                 else:
-#                     result = fn(**fn_args) if fn else {"error": f"Unknown tool {fn_name}"}
-#             else:
-#                 result = fn(**fn_args) if fn else {"error": f"Unknown tool {fn_name}"}
-
-#             clean_result = _sanitize_tool_result(result)
-
-#             history.append(
-#                 types.Content(
-#                     role="user",
-#                     parts=[types.Part.from_function_response(name=fn_name, response={"result": clean_result})],
-#                 )
-#             )
-
-#             # No tools on this call — combining tools with a function-response
-#             # Part triggered a serialization bug in this SDK version.
-#             follow_up = client.models.generate_content(model="gemini-3.6-flash", contents=history, config=config_no_tools)
-#             follow_up_content = follow_up.candidates[0].content
-#             history.append(follow_up_content)
-#             print(f"\nAgent: {follow_up.text}\n")
-#         else:
-#             print(f"\nAgent: {response.text}\n")
 
 
 def _extract_text(content) -> str:

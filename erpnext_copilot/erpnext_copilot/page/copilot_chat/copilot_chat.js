@@ -108,37 +108,152 @@ frappe.pages['copilot_chat'].on_page_load = function(wrapper) {
 	let streamedRawText = '';         // raw markdown accumulated during streaming, re-rendered once the reply completes
 
 	/**
-	 * Converts the agent's raw reply text (which often contains markdown —
-	 * tables for list-style data especially) into HTML.
+	 * Converts the agent's raw reply text into HTML.
 	 *
-	 * The text is HTML-escaped BEFORE being handed to the markdown
-	 * converter. This isn't redundant with the converter's own output: it
-	 * neutralizes any literal "<", ">" or "&" the model's text might
-	 * contain (accidental or adversarial — the model's output is not
-	 * fully trusted input) so it can never be interpreted as a real tag,
-	 * while leaving markdown syntax characters (*, |, #, -) untouched, so
-	 * frappe.markdown still recognizes them and builds real <table>,
-	 * <strong>, <li> etc. elements from them.
+	 * Tables are parsed and built into real <table> HTML by hand, in
+	 * extractAndRenderTables() below — NOT delegated to Showdown or
+	 * frappe.markdown(). Two attempts at getting Frappe's bundled
+	 * markdown converter to render GFM tables (enabling {tables: true}
+	 * explicitly, then normalizing missing newlines between rows) both
+	 * failed to actually fix it in practice, which means either
+	 * window.showdown isn't exposed globally on this Frappe version (so
+	 * the code was silently falling back to frappe.markdown(), which
+	 * apparently doesn't have tables enabled either), or there's some
+	 * other host-specific config issue that isn't practical to keep
+	 * guessing at remotely. Building the table HTML ourselves removes
+	 * that dependency entirely — it only needs String.split, no library.
 	 *
-	 * Uses frappe.markdown() (Showdown-based, already bundled with the
-	 * framework) rather than pulling in a separate markdown library —
-	 * worth confirming it's present on whatever Frappe version you're
-	 * running before relying on it in a live demo; the fallback below
-	 * degrades to plain text with line breaks if it isn't.
+	 * Everything that ISN'T a table (bold text, headings, horizontal
+	 * rules) already rendered correctly through frappe.markdown() per
+	 * earlier screenshots, so that part is left as-is — tables are
+	 * extracted out, replaced with placeholder tokens, the rest of the
+	 * text still goes through the normal converter, then the rendered
+	 * table HTML is substituted back in.
 	 */
+
+	function _escapeCell(text) {
+		// cell text has already been through frappe.utils.escape_html at
+		// the top level, so this only handles the light inline markdown
+		// (bold, code) that commonly shows up inside table cells.
+		return text
+			.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+			.replace(/`(.+?)`/g, '<code>$1</code>');
+	}
+
+	function _splitTableRow(line) {
+		let cells = line.trim();
+		if (cells.startsWith('|')) cells = cells.slice(1);
+		if (cells.endsWith('|')) cells = cells.slice(0, -1);
+		return cells.split('|').map((c) => c.trim());
+	}
+
+	function _isTableRowLine(line) {
+		const t = line.trim();
+		return t.startsWith('|') && t.endsWith('|') && t.length > 1;
+	}
+
+	function _isTableSeparatorLine(line) {
+		if (!_isTableRowLine(line)) return false;
+		const cells = _splitTableRow(line);
+		return cells.length > 0 && cells.every((c) => /^:?-{2,}:?$/.test(c));
+	}
+
+	function _buildTableHtml(headerLine, dataLines) {
+		const headerCells = _splitTableRow(headerLine);
+		let html = '<div class="table-wrap"><table><tr>';
+		headerCells.forEach((c) => { html += `<th>${_escapeCell(c)}</th>`; });
+		html += '</tr>';
+		dataLines.forEach((line) => {
+			const cells = _splitTableRow(line);
+			html += '<tr>';
+			cells.forEach((c) => { html += `<td>${_escapeCell(c)}</td>`; });
+			html += '</tr>';
+		});
+		html += '</table></div>';
+		return html;
+	}
+
+	/**
+	 * Scans line by line for "row line, then separator line, then one or
+	 * more row lines" and swaps each such block for a placeholder token,
+	 * so the surrounding text can still go through normal markdown
+	 * conversion without the converter trying (and failing) to touch the
+	 * table syntax itself.
+	 *
+	 * Also tolerates the collapsed-row-boundary case seen in practice
+	 * (rows run together on one line, "| a | b | | c | d |" with no \n
+	 * between them) by first splitting on any "| |" (closing pipe,
+	 * whitespace only, opening pipe) — that pattern is never a real
+	 * populated cell, only a lost row boundary or, rarely, a genuinely
+	 * empty cell, which splitting still leaves as valid (if slightly
+	 * different) table structure.
+	 */
+	function _extractAndRenderTables(text) {
+		const normalized = text.replace(/\|[ \t]*\|/g, '|\n|');
+		const lines = normalized.split('\n');
+		const placeholders = [];
+		const outLines = [];
+		let i = 0;
+		while (i < lines.length) {
+			if (_isTableRowLine(lines[i]) && i + 1 < lines.length && _isTableSeparatorLine(lines[i + 1])) {
+				const headerLine = lines[i];
+				let j = i + 2;
+				const dataLines = [];
+				while (j < lines.length && _isTableRowLine(lines[j])) {
+					dataLines.push(lines[j]);
+					j++;
+				}
+				const token = `XXCOPILOTTABLE${placeholders.length}XX`;
+				placeholders.push(_buildTableHtml(headerLine, dataLines));
+				if (outLines.length > 0 && outLines[outLines.length - 1].trim() !== '') {
+					outLines.push(''); // isolate the placeholder so nothing above it (e.g. a heading) merges with it
+				}
+				outLines.push(token);
+				outLines.push(''); // and nothing below it (e.g. a "---" divider) reinterprets it as a Setext heading underline
+				i = j;
+			} else {
+				outLines.push(lines[i]);
+				i++;
+			}
+		}
+		return { text: outLines.join('\n'), placeholders };
+	}
+
+	let _mdConverter = null;
+	function _getMarkdownConverter() {
+		if (_mdConverter) return _mdConverter;
+		const Showdown = window.showdown || (window.frappe && frappe.showdown);
+		if (Showdown && Showdown.Converter) {
+			_mdConverter = new Showdown.Converter({ strikethrough: true, simpleLineBreaks: true });
+		}
+		return _mdConverter;
+	}
+
 	function renderAgentMarkdown(rawText) {
 		const escaped = frappe.utils.escape_html(rawText);
+		const { text: withPlaceholders, placeholders } = _extractAndRenderTables(escaped);
+
+		let html;
 		try {
-			if (frappe && typeof frappe.markdown === 'function') {
-				const html = frappe.markdown(escaped);
-				// wrap tables so wide ones scroll horizontally instead of
-				// blowing out the bubble/page width
-				return html.replace(/<table>/g, '<div class="table-wrap"><table>').replace(/<\/table>/g, '</table></div>');
+			const converter = _getMarkdownConverter();
+			if (converter) {
+				html = converter.makeHtml(withPlaceholders);
+			} else if (typeof frappe.markdown === 'function') {
+				html = frappe.markdown(withPlaceholders);
+			} else {
+				throw new Error('no markdown converter available');
 			}
 		} catch (e) {
-			// fall through to plain-text fallback below
+			html = withPlaceholders.replace(/\n/g, '<br>');
 		}
-		return escaped.replace(/\n/g, '<br>');
+
+		// the converter may have wrapped a lone placeholder token in <p>...</p>
+		placeholders.forEach((tableHtml, idx) => {
+			const token = `XXCOPILOTTABLE${idx}XX`;
+			html = html.split(`<p>${token}</p>`).join(tableHtml).split(token).join(tableHtml);
+		});
+
+		return html;
 	}
 
 	function addMessage(text, sender) {
