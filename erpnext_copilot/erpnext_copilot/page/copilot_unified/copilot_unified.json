@@ -1,0 +1,9 @@
+{
+	"doctype": "Page",
+	"title": "Copilot",
+	"name": "copilot_unified",
+	"page_name": "copilot_unified",
+	"icon": "chat",
+	"standard": "Yes",
+	"module": "Erpnext Copilot"
+}

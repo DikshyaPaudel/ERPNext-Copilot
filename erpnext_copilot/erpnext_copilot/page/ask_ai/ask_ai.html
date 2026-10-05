@@ -1,0 +1,692 @@
+<div id="ask-ai-app">
+	<div class="ask-ai-container">
+		<!-- Header -->
+		<div class="ask-ai-header">
+			<div class="eyebrow-line">
+				<span class="bar"></span>
+				{{ __("Ask AI") }}
+			</div>
+			<div class="flex flex-wrap items-end justify-between gap-3">
+				<h1 class="ask-ai-title">{{ __("Ask your data anything") }}</h1>
+				<button class="btn btn-secondary btn-sm" onclick="toggleSettings()">
+					<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+						<circle cx="12" cy="12" r="3" />
+						<path d="M12 2v3M12 19v3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M2 12h3M19 12h3M4.9 19.1 7 17M17 7l2.1-2.1" />
+					</svg>
+					{{ __("AI Settings") }}
+				</button>
+			</div>
+			<p class="ask-ai-subtitle">{{ __("Describe the report you want. It is built using only data you are permitted to see. Keep it as a one-off answer or pin it to a dashboard.") }}</p>
+			<div id="ai-status-badge" class="hidden">
+				<span class="indicator green"></span>
+				<span id="ai-status-text"></span>
+			</div>
+		</div>
+
+		<!-- Settings Panel -->
+		<div id="settings-panel" class="panel ask-ai-panel hidden">
+			<div class="flex items-start gap-3">
+				<div class="kpi-icon blue" style="width: 38px; height: 38px; border-radius: 11px; display: flex; align-items: center; justify-content: center; flex: none">
+					<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round">
+						<path d="M21 2l-2 2m-7.6 7.6a5.5 5.5 0 1 1-7.78 7.78 5.5 5.5 0 0 1 7.78-7.78Zm0 0L15.5 7.5m0 0 3 3L22 7l-3-3m-3.5 3.5L19 4" />
+					</div>
+				<div style="flex: 1; min-width: 0">
+					<div id="settings-title" style="font-weight: 700; font-size: 15px">{{ __("Connect a Gemini API key") }}</div>
+					<p style="font-size: 13px; color: var(--text-muted); margin-top: 2px">{{ __("The AI runs on a Google Gemini key, either your personal one (billed to your Google account, the free tier is plenty) or a site-wide key shared by everyone. Keys are stored encrypted and never leave the server. A personal key always takes priority.") }}</p>
+
+					<!-- Personal Key -->
+					<div class="key-section">
+						<div class="key-eyebrow">{{ __("Your personal key") }}
+							<span id="personal-key-badge" class="badge hidden"><span class="dot"></span>{{ __("set") }}</span>
+						</div>
+						<div class="flex flex-wrap items-end gap-2 mt-2">
+							<div class="form-group" style="flex: 1; min-width: 220px">
+								<label>{{ __("Gemini API key") }}</label>
+								<input type="password" id="personal-key-input" class="form-control" placeholder="AIza..." autocomplete="off" />
+							</div>
+							<div class="form-group" style="width: 200px">
+								<label>{{ __("Model") }}</label>
+								<select id="personal-model-select" class="form-control"></select>
+							</div>
+							<button class="btn btn-primary" id="save-personal-key" disabled>{{ __("Save") }}</button>
+							<button class="btn btn-danger hidden" id="remove-personal-key">{{ __("Remove") }}</button>
+						</div>
+						<p id="site-key-note" class="hidden" style="font-size: 12.5px; color: var(--text-muted); margin-top: 6px">{{ __("You are covered by the site-wide key. Add a personal key only if you want your own quota.") }}</p>
+					</div>
+
+					<!-- Site-wide Key (Admins) -->
+					<div id="site-key-section" class="hidden">
+						<div class="key-eyebrow" style="border-top: 1px solid var(--border-color); padding-top: 14px; margin-top: 4px">{{ __("Site-wide key, shared by all users") }}
+							<span id="site-key-badge" class="badge hidden"><span class="dot"></span>{{ __("set") }}</span>
+						</div>
+						<div class="flex flex-wrap items-end gap-2 mt-2">
+							<div class="form-group" style="flex: 1; min-width: 220px">
+								<label>{{ __("Site Gemini API key") }}</label>
+								<input type="password" id="site-key-input" class="form-control" placeholder="AIza..." autocomplete="off" />
+							</div>
+							<div class="form-group" style="width: 200px">
+								<label>{{ __("Model") }}</label>
+								<select id="site-model-select" class="form-control"></select>
+							</div>
+							<button class="btn btn-primary" id="save-site-key" disabled>{{ __("Save") }}</button>
+							<button class="btn btn-danger hidden" id="remove-site-key">{{ __("Remove") }}</button>
+						</div>
+					</div>
+
+					<!-- Free Tier Guide -->
+					<details class="mt-3" open>
+						<summary class="key-eyebrow guide-summary">{{ __("How to get a free Gemini API key") }}</summary>
+						<ol class="guide">
+							<li>{{ __("Go to aistudio.google.com/apikey and sign in with any Google account.") }}</li>
+							<li>{{ __("Click Create API key (pick \"Create in new project\" if asked).") }}</li>
+							<li>{{ __("Copy the key that starts with AIza and paste it above.") }}</li>
+							<li>{{ __("The free tier includes generous daily use of Gemini Flash, with no credit card needed.") }}</li>
+						</ol>
+					</details>
+				</div>
+			</div>
+		</div>
+
+		<!-- Ask Box -->
+		<div id="ask-box" class="panel ask-ai-panel hidden">
+			<div class="flex items-center gap-2">
+				<input type="text" id="question-input" class="form-control ask-input" placeholder="{{ __("e.g. revenue by brand this year, or the top 10 unpaid invoices") }}" />
+				<button class="btn btn-primary" id="ask-btn">{{ __("Ask") }}</button>
+			</div>
+		</div>
+
+		<!-- Example Chips -->
+		<div id="examples-row" class="hidden mt-3 flex flex-wrap gap-2">
+			<button class="btn btn-secondary btn-sm example-chip" data-q="Revenue by brand">{{ __("Revenue by brand") }}</button>
+			<button class="btn btn-secondary btn-sm example-chip" data-q="Monthly sales this year">{{ __("Monthly sales this year") }}</button>
+			<button class="btn btn-secondary btn-sm example-chip" data-q="Top customers by revenue">{{ __("Top customers by revenue") }}</button>
+			<button class="btn btn-secondary btn-sm example-chip" data-q="Unpaid invoices">{{ __("Unpaid invoices") }}</button>
+		</div>
+
+		<!-- Loading State -->
+		<div id="loading-state" class="panel ask-ai-panel hidden mt-3">
+			<div class="flex items-center gap-3">
+				<div class="skeleton" style="width: 34px; height: 34px; border-radius: 10px"></div>
+				<div style="flex: 1">
+					<div class="skeleton" style="height: 14px; width: 40%"></div>
+					<div class="skeleton mt-2" style="height: 11px; width: 65%"></div>
+				</div>
+			</div>
+			<div class="skeleton mt-4" style="height: 220px"></div>
+			<p class="key-eyebrow mt-3">{{ __("Picking the data, building the report, checking it against your permissions") }}</p>
+		</div>
+
+		<!-- Clarification -->
+		<div id="clarify-state" class="panel ask-ai-panel hidden mt-3">
+			<div class="flex items-start gap-3">
+				<div class="icon-wrapper blue" style="width: 34px; height: 34px; border-radius: 10px; display: flex; align-items: center; justify-content: center; flex: none">
+					<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+						<path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3M12 17h.01" />
+						<circle cx="12" cy="12" r="9.2" />
+					</svg>
+				</div>
+				<div style="flex: 1; min-width: 0">
+					<div id="clarify-question" style="font-weight: 700"></div>
+					<div id="clarify-options" class="mt-2 flex flex-wrap gap-2"></div>
+					<div class="mt-3 flex items-center gap-2">
+						<input type="text" id="clarify-reply" class="form-control" placeholder="{{ __("Type your answer…") }}" style="flex: 1; height: 36px;" />
+						<button class="btn btn-primary btn-sm" id="clarify-submit">{{ __("Answer") }}</button>
+					</div>
+				</div>
+			</div>
+		</div>
+
+		<!-- Error State -->
+		<div id="error-state" class="panel ask-ai-panel hidden mt-3 error-panel">
+			<div style="font-weight: 700; color: var(--text-color)">{{ __("Couldn't build that report") }}</div>
+			<p id="error-message" style="font-size: 13px; color: var(--text-muted); margin-top: 4px"></p>
+		</div>
+
+		<!-- Result -->
+		<div id="result-state" class="hidden">
+			<div class="mt-3 mb-2 flex flex-wrap items-baseline justify-between gap-2">
+				<div>
+					<h2 id="result-title" style="font-size: 19px; font-weight: 800; letter-spacing: -0.02em"></h2>
+					<p id="result-explanation" class="hidden" style="font-size: 13px; color: var(--text-muted)"></p>
+				</div>
+				<span class="badge amber"><span class="dot"></span>{{ __("Not saved yet") }}</span>
+			</div>
+			<p id="empty-widgets-note" class="hidden" style="font-size: 12.5px; color: var(--text-muted); margin-bottom: 8px">{{ __("Widgets marked No data yet have nothing to show on this site right now. They are left out of saving unless you click the circle to include them.") }}</p>
+
+			<!-- Analysis -->
+			<div id="analysis-panel" class="panel analysis-panel hidden">
+				<div class="analysis-eyebrow">{{ __("Analysis") }}</div>
+				<div id="analysis-headline" class="analysis-head"></div>
+				<ul id="analysis-findings" class="analysis-list"></ul>
+				<ul id="analysis-watch" class="analysis-list analysis-watch hidden"></ul>
+			</div>
+
+			<!-- Widgets Grid -->
+			<div id="widgets-grid" class="ai-grid"></div>
+
+			<!-- Refine/Follow-up -->
+			<div class="panel ask-ai-panel mt-3" style="padding: 13px 16px">
+				<div class="flex items-center gap-2">
+					<input type="text" id="followup-input" class="form-control" placeholder="{{ __("Refine or add more, e.g. also show returns, or split it by territory") }}" style="flex: 1; border: none; background: transparent; outline: none; font-size: 14px; min-width: 0" />
+					<button class="btn btn-primary btn-sm" id="followup-btn">{{ __("Add") }}</button>
+				</div>
+				<div id="refine-chips" class="mt-2 flex flex-wrap items-center gap-2 hidden">
+					<span class="chip-label">{{ __("Refine") }}</span>
+				</div>
+				<div id="suggestion-chips" class="mt-2 flex flex-wrap items-center gap-2 hidden">
+					<span class="chip-label">{{ __("Ideas") }}</span>
+				</div>
+				<p id="followup-error" class="hidden" style="font-size: 12.5px; color: var(--danger); margin-top: 6px"></p>
+			</div>
+
+			<!-- Actions -->
+			<div class="panel ask-ai-panel mt-3" style="padding: 13px 16px">
+				<div class="flex flex-wrap items-center gap-2">
+					<span class="key-eyebrow">{{ __("Keep it?") }}</span>
+					<input type="text" id="new-dash-title" class="form-control" placeholder="{{ __("New dashboard name") }}" style="min-width: 190px; height: 32px; padding: 0 10px;" />
+					<button class="btn btn-primary btn-sm" id="save-new-btn" disabled>{{ __("Save as new dashboard") }}</button>
+					<button class="btn btn-primary btn-sm" id="save-report-btn" disabled style="background: var(--violet, #8b5cf6); border-color: var(--violet, #8b5cf6);">{{ __("Save as Report") }}</button>
+					<span class="key-eyebrow" style="font-size: 10px; color: var(--text-muted)">{{ __("or") }}</span>
+					<select id="target-dashboard" class="form-control" style="min-width: 200px">
+						<option value="" disabled>{{ __("Add all to an existing one…") }}</option>
+					</select>
+					<button class="btn btn-secondary btn-sm" id="append-btn" disabled>{{ __("Add") }}</button>
+					<a id="open-dashboard-link" class="badge green hidden" style="text-decoration: none"><span class="dot"></span> {{ __("Saved. Open the dashboard") }}</a>
+					<a id="open-report-link" class="badge violet hidden" style="text-decoration: none"><span class="dot"></span> {{ __("Saved. Open the report") }}</a>
+					<span style="flex: 1"></span>
+					<button class="btn btn-secondary btn-sm" id="reset-btn">{{ __("New question") }}</button>
+				</div>
+				<p id="pin-error" class="hidden" style="font-size: 12.5px; color: var(--danger); margin-top: 6px"></p>
+			</div>
+		</div>
+	</div>
+</div>
+
+<style>
+/* Ask AI Page Styles */
+.ask-ai-container {
+	max-width: 1200px;
+	margin: 0 auto;
+	padding: 24px;
+}
+
+.eyebrow-line {
+	font-size: 12.5px;
+	letter-spacing: 0.1em;
+	text-transform: uppercase;
+	color: var(--blue, #3b82f6);
+	display: inline-flex;
+	align-items: center;
+	gap: 9px;
+}
+
+.eyebrow-line .bar {
+	width: 20px;
+	height: 2px;
+	background: var(--blue, #3b82f6);
+	display: inline-block;
+}
+
+.ask-ai-title {
+	font-size: 30px;
+	font-weight: 800;
+	letter-spacing: -0.03em;
+	margin-top: 8px;
+	color: var(--text-color);
+	margin-bottom: 0;
+}
+
+.ask-ai-subtitle {
+	color: var(--text-muted);
+	margin-top: 4px;
+	font-size: 14.5px;
+	line-height: 1.5;
+}
+
+.ask-ai-panel {
+	background: var(--panel-bg, #ffffff);
+	border: 1px solid var(--border-color, #e5e7eb);
+	border-radius: 12px;
+	padding: 18px;
+}
+
+.key-eyebrow {
+	font-size: 10.5px;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	color: var(--text-muted);
+	font-weight: 500;
+}
+
+.guide-summary {
+	font-size: 11px;
+	letter-spacing: 0.06em;
+	text-transform: uppercase;
+	color: var(--blue, #3b82f6);
+	cursor: pointer;
+}
+
+.guide {
+	font-size: 13px;
+	color: var(--text-muted);
+	margin: 8px 0 0;
+	padding-inline-start: 18px;
+	line-height: 1.9;
+	list-style: decimal;
+}
+
+.kpi-icon {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+}
+
+.icon-wrapper {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+}
+
+.icon-wrapper.blue {
+	background: color-mix(in srgb, var(--blue, #3b82f6) 12%, var(--panel-bg));
+	color: var(--blue, #3b82f6);
+}
+
+.indicator {
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+	display: inline-block;
+	margin-right: 6px;
+}
+
+.indicator.green {
+	background: var(--success, #10b981);
+}
+
+.badge {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	padding: 4px 10px;
+	border-radius: 999px;
+	font-size: 11px;
+	font-weight: 600;
+}
+
+.badge .dot {
+	width: 6px;
+	height: 6px;
+	border-radius: 50%;
+	background: currentColor;
+}
+
+.badge.amber {
+	background: color-mix(in srgb, var(--warning, #f59e0b) 12%, var(--panel-bg));
+	color: var(--warning, #f59e0b);
+	border: 1px solid color-mix(in srgb, var(--warning, #f59e0b) 30%, var(--border-color));
+}
+
+.badge.green {
+	background: color-mix(in srgb, var(--success, #10b981) 12%, var(--panel-bg));
+	color: var(--success, #10b981);
+	border: 1px solid color-mix(in srgb, var(--success, #10b981) 30%, var(--border-color));
+}
+
+.badge.hidden {
+	display: none;
+}
+
+.form-group {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+
+.form-group label {
+	font-size: 12px;
+	font-weight: 600;
+	color: var(--text-color);
+}
+
+.form-control {
+	height: 36px;
+	padding: 0 12px;
+	border-radius: 10px;
+	border: 1px solid var(--border-color, #e5e7eb);
+	background: var(--panel-bg, #ffffff);
+	color: var(--text-color);
+	font-family: inherit;
+	font-size: 13.5px;
+	outline: none;
+	width: 100%;
+	box-sizing: border-box;
+}
+
+.form-control:focus {
+	border-color: var(--blue, #3b82f6);
+	box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue, #3b82f6) 14%, transparent);
+}
+
+.ask-input {
+	font-size: 15px;
+	flex: 1;
+	min-width: 0;
+}
+
+.skeleton {
+	background: linear-gradient(90deg, var(--border-color) 25%, var(--panel-bg) 50%, var(--border-color) 75%);
+	background-size: 200% 100%;
+	animation: shimmer 1.5s infinite;
+	border-radius: 4px;
+}
+
+@keyframes shimmer {
+	0% { background-position: 200% 0; }
+	100% { background-position: -200% 0; }
+}
+
+.error-panel {
+	border-color: color-mix(in srgb, var(--danger, #ef4444) 40%, var(--border-color));
+	background: color-mix(in srgb, var(--danger, #ef4444) 5%, var(--panel-bg));
+}
+
+.chip-label {
+	font-size: 10px;
+	letter-spacing: 0.06em;
+	text-transform: uppercase;
+	color: var(--text-muted);
+	font-weight: 500;
+}
+
+.ai-grid {
+	display: grid;
+	grid-template-columns: repeat(12, 1fr);
+	gap: 14px;
+}
+
+.ai-card {
+	position: relative;
+	display: flex;
+	flex-direction: column;
+}
+
+.ai-card > .panel {
+	flex: 1;
+	min-height: 0;
+}
+
+.ai-kpi {
+	grid-column: span 3;
+	min-height: 128px;
+	align-self: start;
+}
+
+.ai-chart {
+	grid-column: span 6;
+	height: 366px;
+}
+
+.ai-table {
+	grid-column: span 12;
+	min-height: 300px;
+	max-height: 430px;
+}
+
+.ai-card.ai-off > .panel {
+	opacity: 0.45;
+	filter: grayscale(0.4);
+}
+
+.ai-toggle {
+	position: absolute;
+	top: -8px;
+	inset-inline-start: -8px;
+	z-index: 5;
+	width: 24px;
+	height: 24px;
+	border-radius: 50%;
+	border: 1px solid var(--border-color);
+	background: var(--panel-bg);
+	color: var(--text-muted);
+	cursor: pointer;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+}
+
+.ai-toggle.on {
+	background: var(--blue, #3b82f6);
+	border-color: var(--blue, #3b82f6);
+	color: #fff;
+}
+
+.ai-empty {
+	position: absolute;
+	top: -9px;
+	inset-inline-end: 10px;
+	z-index: 5;
+}
+
+.analysis-panel {
+	padding: 15px 18px;
+	margin-bottom: 14px;
+	border-inline-start: 3px solid var(--blue, #3b82f6);
+}
+
+.analysis-eyebrow {
+	font-size: 9.5px;
+	letter-spacing: 0.1em;
+	text-transform: uppercase;
+	color: var(--text-muted);
+	margin-bottom: 5px;
+}
+
+.analysis-head {
+	font-size: 14.5px;
+	font-weight: 800;
+	letter-spacing: -0.01em;
+	color: var(--text-color);
+	margin-bottom: 8px;
+}
+
+.analysis-list {
+	display: flex;
+	flex-direction: column;
+	gap: 5px;
+	font-size: 13px;
+	color: var(--text-muted);
+	padding-inline-start: 18px;
+	list-style: disc;
+}
+
+.analysis-list li::marker {
+	color: var(--blue, #3b82f6);
+}
+
+.analysis-watch {
+	margin-top: 7px;
+}
+
+.analysis-watch li::marker {
+	color: var(--warning, #f59e0b);
+}
+
+.analysis-watch li {
+	color: var(--text-muted);
+}
+
+.example-chip {
+	border-color: var(--border-color);
+	background: var(--panel-bg);
+	color: var(--text-muted);
+}
+
+.example-chip:hover {
+	border-color: var(--blue, #3b82f6);
+	color: var(--blue, #3b82f6);
+}
+
+.panel-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: 13px 18px;
+	border-bottom: 1px solid var(--border-color);
+}
+
+.panel-h {
+	padding: 13px 18px;
+}
+
+.panel-h .t {
+	font-weight: 600;
+	color: var(--text-color);
+}
+
+/* Number Card / KPI */
+.kpi-panel {
+	height: 100%;
+	display: flex;
+	flex-direction: column;
+	justify-content: center;
+	padding: 16px;
+}
+
+.kpi-value {
+	font-size: 32px;
+	font-weight: 800;
+	line-height: 1.1;
+	color: var(--text-color);
+}
+
+.kpi-label {
+	font-size: 12px;
+	color: var(--text-muted);
+	margin-top: 4px;
+	font-weight: 500;
+}
+
+/* Chart Container */
+.chart-container {
+	height: 100%;
+	min-height: 250px;
+}
+
+/* Table */
+.table-container {
+	height: 100%;
+	overflow: auto;
+}
+
+.table-container table {
+	width: 100%;
+	border-collapse: collapse;
+	font-size: 12px;
+}
+
+.table-container th,
+.table-container td {
+	padding: 8px 12px;
+	text-align: left;
+	border-bottom: 1px solid var(--border-color);
+}
+
+.table-container th {
+	font-weight: 600;
+	color: var(--text-color);
+	background: var(--panel-bg);
+	position: sticky;
+	top: 0;
+}
+
+.table-container tr:hover td {
+	background: color-mix(in srgb, var(--blue, #3b82f6) 4%, var(--panel-bg));
+}
+
+/* Responsive */
+@media (max-width: 900px) {
+	.ai-kpi {
+		grid-column: span 6;
+	}
+	.ai-chart,
+	.ai-table {
+		grid-column: span 12;
+	}
+}
+
+@media (max-width: 600px) {
+	.ai-kpi {
+		grid-column: span 12;
+	}
+	.ask-ai-container {
+		padding: 16px;
+	}
+}
+
+/* Widget Variants Popup */
+.widget-variants {
+	position: absolute;
+	bottom: 8px;
+	inset-inline-end: 8px;
+	z-index: 10;
+	display: flex;
+	gap: 4px;
+	opacity: 0;
+	transition: opacity 0.2s;
+}
+
+.ai-card:hover .widget-variants {
+	opacity: 1;
+}
+
+.variant-btn {
+	width: 28px;
+	height: 28px;
+	border-radius: 7px;
+	border: 1px solid var(--border-color);
+	background: var(--panel-bg);
+	color: var(--text-muted);
+	cursor: pointer;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+}
+
+.variant-btn:hover {
+	color: var(--text-color);
+	border-color: var(--blue, #3b82f6);
+}
+
+.variant-btn.active {
+	background: var(--blue, #3b82f6);
+	border-color: var(--blue, #3b82f6);
+	color: #fff;
+}
+
+/* Form Mini */
+.form-control-mini {
+	height: 32px;
+	padding: 0 10px;
+	border-radius: 8px;
+	border: 1px solid var(--border-color);
+	background: var(--panel-bg);
+	color: var(--text-color);
+	font-family: inherit;
+	font-size: 12.5px;
+	font-weight: 600;
+	outline: none;
+}
+
+.details summary::-webkit-details-marker {
+	color: var(--blue, #3b82f6);
+}
+
+/* Input focus in thread */
+.thread input,
+.thread textarea {
+	letter-spacing: 0;
+}
+</style>

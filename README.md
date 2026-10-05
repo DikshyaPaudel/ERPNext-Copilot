@@ -21,6 +21,33 @@ A left sidebar lists your past conversations, auto-titled from your first messag
 Replies stream in live, with a typing indicator and per-tool-call status ("Calling aggregate_documents...") so a multi-step request doesn't look frozen while it works.
 Agent replies render as markdown — tables, bold text, and lists show up properly instead of raw **/| characters.
 
+## NEW FEATURES (v2.0)
+
+### 🎯 Ask AI Page — Natural Language to Dashboard/Report
+Visit `/app/ask_ai` to describe any report in plain English and get a fully built dashboard with:
+- **KPI Cards** — Revenue totals, counts, averages
+- **Charts** — Bar, Line, Pie, Donut, Area charts
+- **Tables** — Paginated, sortable data tables
+- **Executive Summary** — AI-written analysis of the numbers
+- **One-click Save** — Save as new Dashboard or append to existing
+
+Inspired by [Lumen Reports](https://github.com/ma7mod7osam/lumen_reports) Ask AI flow.
+
+### 🔧 Dashboard/Report Copilot (Proposal-based Editing)
+The new `copilot` endpoint (`erpnext_copilot.custom_code.agent_api.copilot`) enables editing existing dashboards/reports with:
+- **Proposal Flow** — See all changes before applying, with descriptions
+- **Apply / Discard** — One-click to accept or reject the entire proposal
+- **Undo** — Single undo reverts the entire turn
+- **Widget Selection** — Click a widget to scope the copilot to just that widget
+- **Operations**: Layout, Theme, Types, Styles, Add/Remove widgets, Change data, Summaries
+
+### 🛡️ Permission-Aware Query Engine
+New `query_engine.py` executes queries through `frappe.get_list` so that:
+- Role permissions, user permissions, and permission query conditions all apply
+- No raw SQL — all expressions constructed from validated components
+- Supports aggregates (count, sum, avg, min, max), group_by with time grains, series, and table queries
+- Handles Frappe v14/v15 (string SELECT) and v16+ (dict SELECT) transparently
+
 ## Screenshots
 
 
@@ -59,6 +86,8 @@ run()
 
 **Web chat UI:** visit `/app/copilot_chat` on your site.
 
+**Ask AI Page (NEW):** visit `/app/ask_ai` on your site.
+
 ## Tools at a glance
 
 | Category | Tools |
@@ -68,7 +97,7 @@ run()
 | Schema | `get_doctype_fields` |
 | Files | `read_uploaded_file`, `clean_uploaded_file`, `import_data_to_doctype`|
 | Create (confirmed before running) | `create_doctype`, `create_dashboard_chart` |
-|Dashboards | `list_dashboards`
+|Dashboards | `list_dashboards` |
 
 Search and aggregation tools work against any DocType — they take a doctype parameter rather than being hardcoded per document type, and validate it against Frappe's real metadata before building a query.
 
@@ -152,7 +181,6 @@ only showed up in the web interface — see
 - Only tested as Administrator so far — multi-user/role-based permission behavior hasn't been verified end-to-end.
 
 - For a user who already knows ERPNext's Report Builder and filters, typing a sentence to reproduce a filtered list is often slower than just applying the filter — this tool's real value is in write and multi-step operations, not simple reads.
-
 
 
 ## License

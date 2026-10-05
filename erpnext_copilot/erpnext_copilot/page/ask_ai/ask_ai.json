@@ -1,0 +1,9 @@
+{
+	"doctype": "Page",
+	"title": "Ask AI",
+	"name": "ask_ai",
+	"page_name": "ask_ai",
+	"icon": "chat",
+	"standard": "Yes",
+	"module": "Erpnext Copilot"
+}

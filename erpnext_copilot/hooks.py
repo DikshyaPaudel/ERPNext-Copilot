@@ -1,7 +1,7 @@
 app_name = "erpnext_copilot"
 app_title = "Erpnext Copilot"
 app_publisher = "Dikshya Paudel"
-app_description = "AI Agent that lets you manage Erpnext system "
+app_description = "AI Agent that lets you manage Erpnext system - Dashboard/Report builder with natural language"
 app_email = "dikshyapaudel9@gmail.com"
 app_license = "mit"
 
@@ -11,15 +11,15 @@ app_license = "mit"
 # required_apps = []
 
 # Each item in the list will be shown as an app in the apps page
-# add_to_apps_screen = [
-# 	{
-# 		"name": "erpnext_copilot",
-# 		"logo": "/assets/erpnext_copilot/logo.png",
-# 		"title": "Erpnext Copilot",
-# 		"route": "/erpnext_copilot",
-# 		"has_permission": "erpnext_copilot.api.permission.has_app_permission"
-# 	}
-# ]
+add_to_apps_screen = [
+	{
+		"name": "erpnext_copilot",
+		"logo": "/assets/erpnext_copilot/logo.png",
+		"title": "Erpnext Copilot",
+		"route": "/ask_ai",
+		"has_permission": "erpnext_copilot.api.permission.has_app_permission"
+	}
+]
 
 # Includes in <head>
 # ------------------
@@ -241,4 +241,18 @@ app_license = "mit"
 # default_log_clearing_doctypes = {
 # 	"Logging DocType Name": 30  # days to retain logs
 # }
+
+
+
+# Whitelisted API methods for the copilot
+override_whitelisted_methods = {
+    "erpnext_copilot.custom_code.api.get_ai_status": "erpnext_copilot.custom_code.api.get_ai_status",
+    "erpnext_copilot.custom_code.api.save_ai_settings": "erpnext_copilot.custom_code.api.save_ai_settings",
+    "erpnext_copilot.custom_code.api.clear_ai_key": "erpnext_copilot.custom_code.api.clear_ai_key",
+    "erpnext_copilot.custom_code.api.list_models": "erpnext_copilot.custom_code.api.list_models",
+    "erpnext_copilot.custom_code.api.ask_ai": "erpnext_copilot.custom_code.api.ask_ai",
+    "erpnext_copilot.custom_code.api.save_ai_result": "erpnext_copilot.custom_code.api.save_ai_result",
+    "erpnext_copilot.custom_code.api.get_dashboards": "erpnext_copilot.custom_code.api.get_dashboards",
+    "erpnext_copilot.custom_code.agent_api.copilot": "erpnext_copilot.custom_code.agent_api.copilot",
+}
 
