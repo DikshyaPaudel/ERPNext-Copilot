@@ -158,7 +158,7 @@ def _transcript_from_raw(history_raw):
 @frappe.whitelist()
 def list_conversations():
     """Sidebar list — current user's own conversations, most recent first."""
-    return frappe.get_all(
+    return frappe.get_list(
         "Copilot Conversation",
         filters={"owner": frappe.session.user},
         fields=["name", "title", "last_message_at"],
@@ -477,9 +477,15 @@ def _continue_after_tool_result(doc, history_raw):
 def get_tool_calls(conversation: str):
     """Audit trail for one conversation — every write tool the agent
     proposed, whether it was confirmed or cancelled, and what happened.
-    if_owner permission on Copilot Tool Call means this naturally only
-    returns the calling user's own records."""
-    return frappe.get_all(
+
+    MUST use frappe.get_list(), not get_all(). get_all() skips Frappe's
+    permission/match-condition filtering entirely, which means the
+    if_owner restriction on Copilot Tool Call would NEVER actually have
+    applied here — any authenticated user could have passed any other
+    user's conversation name and read their full write-action audit log,
+    arguments included. get_list() is what actually enforces if_owner.
+    """
+    return frappe.get_list(
         "Copilot Tool Call",
         filters={"conversation": conversation},
         fields=["name", "tool_name", "status", "arguments", "result", "started_at", "completed_at"],

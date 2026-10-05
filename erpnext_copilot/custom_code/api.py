@@ -4,9 +4,13 @@ api.py — whitelisted methods exposed to the erpnext_copilot Gemini agent.
 Every function here is decorated with @frappe.whitelist(), meaning it runs
 as whichever Frappe user is currently authenticated (e.g. the bench console
 session user) and is subject to that user's real ERPNext permissions via
-frappe.get_all() / frappe.get_doc() / frappe.get_meta(). No separate API key
-or manual permission logic is used — this is the main advantage of running
-inside the Frappe app rather than as an external script.
+frappe.get_list() and explicit doc.check_permission() calls. (NOT
+frappe.get_all() or a bare frappe.get_doc() — both skip Frappe's
+permission/row-level restriction checks by design; every read in this
+file was audited and fixed to use the permission-respecting equivalent.)
+No separate API key or manual permission logic is used — this is the main
+advantage of running inside the Frappe app rather than as an external
+script.
 """
 import json
 from typing import Optional
@@ -47,6 +51,27 @@ def _has_field_cached(doctype: str, fieldname: str) -> bool:
     return fieldname in _cached_doctype_fieldnames(doctype)
 
 
+def _resolve_file_doc(file_name: str):
+    """Look up a File record by name or file_url, with an explicit read
+    permission check. frappe.get_doc() alone does not check permissions —
+    without this, any authenticated user could preview/read the content
+    of ANY uploaded file on the site by name or URL, regardless of
+    whether they have access to whatever it's attached to. Raises
+    frappe.PermissionError (caller should catch it) if the file exists
+    but isn't readable by the current user; returns None if no match.
+    """
+    file_doc = None
+    if frappe.db.exists("File", file_name):
+        file_doc = frappe.get_doc("File", file_name)
+    else:
+        matches = frappe.get_list("File", filters={"file_url": file_name}, limit=1)
+        if matches:
+            file_doc = frappe.get_doc("File", matches[0].name)
+    if file_doc:
+        file_doc.check_permission("read")
+    return file_doc
+
+
 def _cached_list_view_fieldnames(doctype: str) -> list:
     """Fieldnames flagged in_list_view, cached briefly — used to build a
     default column set when the agent doesn't specify which fields it wants."""
@@ -78,7 +103,9 @@ def list_invoices(days: int = 20, customer: Optional[str] = None, only_unpaid: b
     if only_unpaid:
         filters["outstanding_amount"] = [">", 0]
 
-    invoices = frappe.get_all(
+    # frappe.get_list (not get_all) — get_all explicitly skips Frappe's
+    # permission/match-condition filtering by design; get_list applies it.
+    invoices = frappe.get_list(
         "Sales Invoice",
         filters=filters,
         fields=["name", "customer", "posting_date", "grand_total", "outstanding_amount", "status"],
@@ -99,8 +126,17 @@ def aggregate_documents(doctype: str, group_by: str, days: Optional[int] = None,
     supplier', 'Support Ticket grouped by status', etc.
 
     doctype and group_by are validated against Frappe's real metadata
-    before being used in a raw SQL query, since Frappe does not
-    parameterize identifiers (table/column names) the way it does values.
+    before being used to build a query, since Frappe does not parameterize
+    identifiers (table/column names) the way it does values.
+
+    Built on frappe.get_list() with aggregate expressions in `fields`,
+    NOT frappe.db.sql(). The identifier-safety story was already correct
+    (validated field names before interpolation) — what raw db.sql()
+    never did, and get_list() does automatically, is apply Frappe's
+    row-level permission/match-condition filtering for the calling user.
+    A user restricted to certain records (by User Permission, e.g. scoped
+    to one Company or Territory) would previously have seen every record
+    regardless of that restriction; get_list() closes that.
     """
     if not frappe.db.exists("DocType", doctype):
         return {"error": f"'{doctype}' is not a valid DocType."}
@@ -111,19 +147,13 @@ def aggregate_documents(doctype: str, group_by: str, days: Optional[int] = None,
     if days and date_field not in fieldnames:
         return {"error": f"'{date_field}' is not a valid field on {doctype}."}
 
-    conditions = []
-    values = []
-
+    filters = {}
     if days:
         from datetime import date, timedelta
         cutoff = (date.today() - timedelta(days=days)).isoformat()
-        conditions.append(f"`{date_field}` >= %s")
-        values.append(cutoff)
-
+        filters[date_field] = [">=", cutoff]
     if "docstatus" in fieldnames:
-        conditions.append("docstatus != 2")
-
-    where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        filters["docstatus"] = ["!=", 2]
 
     total_field = None
     for candidate in ("grand_total", "total", "amount"):
@@ -131,24 +161,21 @@ def aggregate_documents(doctype: str, group_by: str, days: Optional[int] = None,
             total_field = candidate
             break
 
+    fields = [f"`{group_by}` as group_value", "count(name) as count"]
     if total_field:
-        query = f"""
-            SELECT `{group_by}` as group_value, COUNT(*) as count, SUM(`{total_field}`) as total
-            FROM `tab{doctype}`
-            {where_clause}
-            GROUP BY `{group_by}`
-            ORDER BY count DESC
-        """
-    else:
-        query = f"""
-            SELECT `{group_by}` as group_value, COUNT(*) as count
-            FROM `tab{doctype}`
-            {where_clause}
-            GROUP BY `{group_by}`
-            ORDER BY count DESC
-        """
+        fields.append(f"sum(`{total_field}`) as total")
 
-    results = frappe.db.sql(query, tuple(values), as_dict=True)
+    try:
+        results = frappe.get_list(
+            doctype,
+            filters=filters,
+            fields=fields,
+            group_by=group_by,
+            order_by="count desc",
+        )
+    except frappe.PermissionError:
+        return {"error": f"You don't have permission to read {doctype}."}
+
     for r in results:
         if "total" in r and r["total"] is not None:
             r["total"] = float(r["total"])
@@ -184,13 +211,10 @@ def read_uploaded_file(file_name: str, preview_rows: int = 10):
     import pandas as pd
     import json
 
-    file_doc = None
-    if frappe.db.exists("File", file_name):
-        file_doc = frappe.get_doc("File", file_name)
-    else:
-        matches = frappe.get_all("File", filters={"file_url": file_name}, limit=1)
-        if matches:
-            file_doc = frappe.get_doc("File", matches[0].name)
+    try:
+        file_doc = _resolve_file_doc(file_name)
+    except frappe.PermissionError:
+        return {"error": "You don't have permission to read this file."}
 
     if not file_doc:
         return {"error": f"No uploaded file found matching '{file_name}'."}
@@ -226,13 +250,10 @@ def clean_uploaded_file(file_name: str, target_doctype: str, cleaning_instructio
     from google import genai
     from google.genai import types
 
-    file_doc = None
-    if frappe.db.exists("File", file_name):
-        file_doc = frappe.get_doc("File", file_name)
-    else:
-        matches = frappe.get_all("File", filters={"file_url": file_name}, limit=1)
-        if matches:
-            file_doc = frappe.get_doc("File", matches[0].name)
+    try:
+        file_doc = _resolve_file_doc(file_name)
+    except frappe.PermissionError:
+        return {"error": "You don't have permission to read this file."}
 
     if not file_doc:
         return {"error": f"No uploaded file found matching '{file_name}'."}
@@ -393,7 +414,7 @@ def create_doctype(doctype_name: str, fields: list, module: str = "Custom"):
 @frappe.whitelist()
 def list_dashboards():
     """List all available Dashboards in ERPNext (e.g. Selling, Buying, Accounts)."""
-    dashboards = frappe.get_all("Dashboard", fields=["name", "dashboard_name", "module"])
+    dashboards = frappe.get_list("Dashboard", fields=["name", "dashboard_name", "module"])
     return json.loads(json.dumps(dashboards, default=str))
 
 
@@ -411,7 +432,7 @@ def add_chart_to_dashboard(chart_name: str, dashboard_name: str):
     """
     real_chart = chart_name
     if not frappe.db.exists("Dashboard Chart", real_chart):
-        charts = frappe.get_all("Dashboard Chart", filters={"chart_name": chart_name}, limit=1)
+        charts = frappe.get_list("Dashboard Chart", filters={"chart_name": chart_name}, limit=1)
         if charts:
             real_chart = charts[0].name
         else:
@@ -419,7 +440,7 @@ def add_chart_to_dashboard(chart_name: str, dashboard_name: str):
 
     real_dashboard = dashboard_name
     if not frappe.db.exists("Dashboard", real_dashboard):
-        dashboards = frappe.get_all("Dashboard", filters={"dashboard_name": dashboard_name}, limit=1)
+        dashboards = frappe.get_list("Dashboard", filters={"dashboard_name": dashboard_name}, limit=1)
         if dashboards:
             real_dashboard = dashboards[0].name
         else:
@@ -541,7 +562,10 @@ def search_documents(doctype: str, filters: Optional[dict] = None, fields: Optio
             if not _has_field_cached(doctype, key) and key != "name":
                 return {"error": f"'{key}' is not a valid field on {doctype}."}
 
-    results = frappe.get_all(doctype, filters=filters or {}, fields=fields, limit=limit)
+    try:
+        results = frappe.get_list(doctype, filters=filters or {}, fields=fields, limit=limit)
+    except frappe.PermissionError:
+        return {"error": f"You don't have permission to read {doctype}."}
     return json.loads(json.dumps(results, default=str))
 
 
@@ -555,12 +579,15 @@ def search_doctype(doctype: str, query: str, limit: int = 20):
     meta = frappe.get_meta(doctype)
     search_field = meta.title_field or "name"
 
-    results = frappe.get_all(
-        doctype,
-        filters={search_field: ["like", f"%{query}%"]},
-        fields=["name", search_field] if search_field != "name" else ["name"],
-        limit=limit,
-    )
+    try:
+        results = frappe.get_list(
+            doctype,
+            filters={search_field: ["like", f"%{query}%"]},
+            fields=["name", search_field] if search_field != "name" else ["name"],
+            limit=limit,
+        )
+    except frappe.PermissionError:
+        return {"error": f"You don't have permission to read {doctype}."}
     return json.loads(json.dumps(results, default=str))
 
 
@@ -570,6 +597,13 @@ def fetch(doctype: str, name: str):
     if not frappe.db.exists(doctype, name):
         return {"error": f"No {doctype} found with name '{name}'."}
     doc = frappe.get_doc(doctype, name)
+    # frappe.get_doc() alone does not check permission — without this, the
+    # agent could fetch ANY document by name regardless of whether the
+    # calling user could actually open it in the UI.
+    try:
+        doc.check_permission("read")
+    except frappe.PermissionError:
+        return {"error": f"You don't have permission to read this {doctype}."}
     return json.loads(doc.as_json())
 
 
@@ -580,3 +614,170 @@ def search(query: str, limit: int = 20):
     from frappe.utils.global_search import search as global_search
     results = global_search(text=query, start=0, limit=limit)
     return json.loads(json.dumps(results, default=str))
+
+
+_VALID_AGGREGATIONS = {"sum", "count", "avg"}
+
+
+@frappe.whitelist()
+def cross_doctype_summary(rows: list):
+    """Compute a small summary where EACH ROW aggregates a different
+    DocType — e.g. total outstanding Sales Invoice amount on one row,
+    total Delivery Note grand_total on another. This is exactly the case
+    a single Report Builder report can't express (it's scoped to one
+    doctype); this always answers live in chat instead, and can never be
+    persisted as a saved Report — there's no `report_type` that covers a
+    genuine cross-doctype join without either raw SQL (which bypasses
+    Frappe's permission model) or a stored Script Report (arbitrary code
+    execution), both of which this app deliberately avoids.
+
+    Each row's field/filter names are checked against real metadata before
+    use, and the aggregation itself runs through frappe.get_list() — not
+    frappe.db.count()/frappe.db.get_value(), which operate below Frappe's
+    permission layer and don't apply row-level restrictions (User
+    Permissions, match_conditions) the way get_list() does.
+    """
+    if isinstance(rows, str):
+        rows = json.loads(rows)
+
+    results = []
+    for row in rows:
+        doctype = row.get("doctype")
+        field = row.get("field")
+        aggregation = (row.get("aggregation") or "sum").lower()
+        filters = row.get("filters") or {}
+        label = row.get("label") or f"{aggregation}({field or 'name'}) on {doctype}"
+
+        if not frappe.db.exists("DocType", doctype):
+            results.append({"label": label, "error": f"'{doctype}' is not a valid DocType."})
+            continue
+        if aggregation not in _VALID_AGGREGATIONS:
+            results.append({"label": label, "error": f"'{aggregation}' must be one of {sorted(_VALID_AGGREGATIONS)}."})
+            continue
+
+        fieldnames = _cached_doctype_fieldnames(doctype)
+        if aggregation != "count":
+            if not field:
+                results.append({"label": label, "error": "'field' is required unless aggregation is 'count'."})
+                continue
+            if field not in fieldnames:
+                results.append({"label": label, "error": f"'{field}' is not a valid field on {doctype}."})
+                continue
+
+        bad_filters = [k for k in filters if k not in fieldnames]
+        if bad_filters:
+            results.append({"label": label, "error": f"Invalid filter fields for {doctype}: {bad_filters}"})
+            continue
+
+        try:
+            # field name is validated against real metadata above, so it's
+            # safe to interpolate into the aggregate expression; filters
+            # are passed as values, not string-built, same as elsewhere.
+            agg_field = "count(name) as total" if aggregation == "count" else f"{aggregation}(`{field}`) as total"
+            rows_result = frappe.get_list(doctype, filters=filters, fields=[agg_field])
+            value = (rows_result[0].total if rows_result else 0) or 0
+        except Exception as e:
+            results.append({"label": label, "error": str(e)})
+            continue
+
+        results.append({"label": label, "doctype": doctype, "aggregation": aggregation, "value": value})
+
+    return {"rows": results}
+
+
+# ---------------------------------------------------------------------------
+# Reports — the agent never depends on one of these existing to answer a
+# question: search_documents/aggregate_documents already handle any
+# doctype/filter combination inline in chat, and that's the universal
+# fallback regardless of what's below. find_reports is purely additive
+# ("there's also a saved report for this, here's a link"); save_report is
+# only ever called when the user explicitly asks to save the current view
+# as a reusable report, never automatically.
+# ---------------------------------------------------------------------------
+
+def _report_url(doctype: str, report_name: Optional[str] = None) -> str:
+    """Best-effort desk route to a doctype's Report view, or a specific
+    saved report. Frappe's exact URL scheme for report routing has shifted
+    across versions — verify this resolves correctly on your instance
+    before relying on it; the doctype-route slug (spaces/underscores to
+    hyphens, lowercased) is the part most likely to need adjusting for an
+    unusual doctype name.
+    """
+    slug = frappe.scrub(doctype).replace("_", "-")
+    if report_name:
+        from urllib.parse import quote
+        return f"/app/{slug}/view/report?report_name={quote(report_name)}"
+    return f"/app/{slug}/view/report"
+
+
+@frappe.whitelist()
+def find_reports(doctype: str):
+    """List existing saved Reports already available for a DocType, so the
+    agent can offer one instead of assuming nothing fits. Read-only —
+    never creates anything."""
+    if not frappe.db.exists("DocType", doctype):
+        return {"error": f"'{doctype}' is not a valid DocType."}
+
+    reports = frappe.get_list(
+        "Report",
+        filters={"ref_doctype": doctype, "disabled": 0},
+        fields=["name", "report_type"],
+        limit=20,
+    )
+    for r in reports:
+        r["url"] = _report_url(doctype, r["name"])
+    return {
+        "doctype": doctype,
+        "reports": reports,
+        "generic_report_view_url": _report_url(doctype),
+    }
+
+
+@frappe.whitelist()
+def save_report(report_name: str, doctype: str, columns: list, filters: Optional[dict] = None):
+    """Save the current filtered view as a reusable Report Builder report —
+    only called when the user explicitly asks to save something, never
+    automatically after just answering a question. columns and any
+    filtered field are validated against real metadata first, same
+    discipline as aggregate_documents/search_documents.
+
+    NOTE: the exact JSON schema Frappe's Report Builder expects in the
+    `json` field (the shape of `filters` and `columns` below) has varied
+    across Frappe versions in ways I could not verify without a live
+    instance — treat this as a solid starting point to test against your
+    actual site, not a guaranteed-correct implementation.
+    """
+    if not frappe.db.exists("DocType", doctype):
+        return {"error": f"'{doctype}' is not a valid DocType."}
+    if frappe.db.exists("Report", report_name):
+        return {"error": f"A report named '{report_name}' already exists."}
+
+    fieldnames = _cached_doctype_fieldnames(doctype)
+    bad_columns = [c for c in columns if c not in fieldnames]
+    if bad_columns:
+        return {"error": f"Invalid columns for {doctype}: {bad_columns}", "valid_fields": sorted(fieldnames)}
+
+    if filters:
+        bad_filters = [k for k in filters if k not in fieldnames]
+        if bad_filters:
+            return {"error": f"Invalid filter fields for {doctype}: {bad_filters}"}
+
+    report_json = json.dumps({
+        "filters": [[doctype, k, "=", v] for k, v in (filters or {}).items()],
+        "columns": [{"fieldname": c, "fieldtype": "Data", "label": c.replace("_", " ").title()} for c in columns],
+    })
+
+    doc = frappe.get_doc({
+        "doctype": "Report",
+        "report_name": report_name,
+        "ref_doctype": doctype,
+        "report_type": "Report Builder",
+        "is_standard": "No",
+        "json": report_json,
+    })
+    try:
+        doc.insert()
+    except frappe.PermissionError:
+        return {"error": "You don't have permission to create Reports."}
+
+    return {"success": True, "report_name": doc.name, "url": _report_url(doctype, doc.name)}
