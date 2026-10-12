@@ -46,7 +46,7 @@ Gemini decides which tool to call. Every tool runs as **your actual logged-in ER
 
 | | |
 |---|---|
-| ![Revenue table](docs/screenshots/1stt.png) | ![Confirm card chart](docs/screenshots/dashboardconfirm.png.png) |
+| ![Revenue table](docs/screenshots/1stt.png) | ![Confirm card chart](docs/screenshots/dashboardconfirm.png) |
 | *Revenue by customer — live ERPNext data in a real table* | *Human-readable confirm card before creating a chart* |
 
 | | |
@@ -56,7 +56,7 @@ Gemini decides which tool to call. Every tool runs as **your actual logged-in ER
 
 | | |
 |---|---|
-| ![Light mode](docs/screenshots/light_theme.png) | ![Dark mode](docs/screenshots/dark_theme.png.png) |
+| ![Light mode](docs/screenshots/light_theme.png) | ![Dark mode](docs/screenshots/dark_theme.png) |
 | *Light mode* | *Dark mode — follows ERPNext's own theme toggle* |
 
 ![Audit log](docs/screenshots/log.png)
