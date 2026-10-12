@@ -229,6 +229,59 @@ ADD_CHART_TO_DASHBOARD_DECLARATION = types.FunctionDeclaration(
     ),
 )
 
+FIND_REPORTS_DECLARATION = types.FunctionDeclaration(
+    name="find_reports",
+    description="List existing saved Reports already available for a DocType. Read-only. Use this to check whether a saved report already covers what the user is asking about before assuming nothing fits — it never creates anything.",
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "doctype": types.Schema(type=types.Type.STRING, description="The DocType to look for existing reports on, e.g. 'Sales Invoice'."),
+        },
+        required=["doctype"],
+    ),
+)
+
+SAVE_REPORT_DECLARATION = types.FunctionDeclaration(
+    name="save_report",
+    description="Save a filtered view as a reusable Report Builder report. ONLY call this when the user explicitly asks to save/keep a report — never automatically after just answering a question with data. Only works for a SINGLE doctype — cannot be used for a cross-doctype summary (see cross_doctype_summary).",
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "report_name": types.Schema(type=types.Type.STRING, description="Name for the new report."),
+            "doctype": types.Schema(type=types.Type.STRING, description="The DocType this report is based on."),
+            "columns": types.Schema(type=types.Type.ARRAY, items=types.Schema(type=types.Type.STRING), description="Fieldnames to show as columns."),
+            "filters": types.Schema(type=types.Type.OBJECT, description="Optional field-value filters to bake into the saved report."),
+        },
+        required=["report_name", "doctype", "columns"],
+    ),
+)
+
+CROSS_DOCTYPE_SUMMARY_DECLARATION = types.FunctionDeclaration(
+    name="cross_doctype_summary",
+    description="Compute a small summary where EACH ROW aggregates a DIFFERENT DocType — e.g. total outstanding Sales Invoice amount on one row, total Delivery Note grand_total on another. Use this instead of aggregate_documents when the comparison spans multiple doctypes, not a breakdown within one. Always answers inline in chat and can never be saved as a Report — Report Builder is scoped to a single doctype, so a genuine cross-doctype summary has no report type this app will create for it.",
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "rows": types.Schema(
+                type=types.Type.ARRAY,
+                description="One entry per summary row.",
+                items=types.Schema(
+                    type=types.Type.OBJECT,
+                    properties={
+                        "label": types.Schema(type=types.Type.STRING, description="Display label, e.g. 'Total Outstanding Sales Invoices'."),
+                        "doctype": types.Schema(type=types.Type.STRING),
+                        "field": types.Schema(type=types.Type.STRING, description="Field to aggregate, e.g. 'outstanding_amount'. Omit when aggregation is 'count'."),
+                        "aggregation": types.Schema(type=types.Type.STRING, description="'sum', 'count', or 'avg'."),
+                        "filters": types.Schema(type=types.Type.OBJECT, description="Optional field-value filters for this row only."),
+                    },
+                    required=["doctype", "aggregation"],
+                ),
+            ),
+        },
+        required=["rows"],
+    ),
+)
+
 TOOLS = types.Tool(function_declarations=[
     LIST_INVOICES_DECLARATION,
     AGGREGATE_DOCUMENTS_DECLARATION,
@@ -240,6 +293,9 @@ TOOLS = types.Tool(function_declarations=[
     CREATE_DASHBOARD_CHART_DECLARATION,
     LIST_DASHBOARDS_DECLARATION,
     ADD_CHART_TO_DASHBOARD_DECLARATION,
+    FIND_REPORTS_DECLARATION,
+    SAVE_REPORT_DECLARATION,
+    CROSS_DOCTYPE_SUMMARY_DECLARATION,
     SEARCH_DOCUMENTS_DECLARATION,
     SEARCH_DOCTYPE_DECLARATION,
     FETCH_DECLARATION,
@@ -257,6 +313,9 @@ TOOL_DISPATCH = {
     "create_dashboard_chart": api.create_dashboard_chart,
     "list_dashboards": api.list_dashboards,
     "add_chart_to_dashboard": api.add_chart_to_dashboard,
+    "find_reports": api.find_reports,
+    "save_report": api.save_report,
+    "cross_doctype_summary": api.cross_doctype_summary,
     "search_documents": api.search_documents,
     "search_doctype": api.search_doctype,
     "fetch": api.fetch,
@@ -265,7 +324,7 @@ TOOL_DISPATCH = {
 
 # Tools that change data — gated by an explicit human confirmation in
 # Python, not by trusting the model to self-police.
-WRITE_TOOLS = {"create_doctype", "create_dashboard_chart", "add_chart_to_dashboard", "import_data_to_doctype"}
+WRITE_TOOLS = {"create_doctype", "create_dashboard_chart", "add_chart_to_dashboard", "import_data_to_doctype", "save_report"}
 SYSTEM_INSTRUCTION = """You are an ERPNext operations assistant running inside a real
 ERPNext site, acting with the current user's own permissions.
 
@@ -302,6 +361,53 @@ When the user wants a chart or dashboard:
 If you're unsure whether a DocType or field exists, use get_doctype_fields
 to check rather than guessing.
 
+When the user asks for a filtered or tabular list of data:
+- ALWAYS answer using search_documents or aggregate_documents first and show
+  the actual data in your reply — this works for any doctype/filter
+  combination and never depends on a saved report existing.
+- Do NOT call find_reports automatically on every query. Only call it when
+  the user explicitly asks something like "is there already a report for X"
+  or "show me available reports." Calling it speculatively causes unnecessary
+  extra reasoning and slows the response.
+- Do NOT call save_report unless the user explicitly asks to save, keep, or
+  create a report from what you just showed them. Never save automatically
+  just because no existing report matched.
+
+When the user DOES explicitly ask to save/create/keep a report (e.g. "create
+a report too", "save this as a Report Builder report", "make this a saved
+report") — CALL save_report. Do not refuse just because your prior answer
+was an aggregated summary (e.g. "revenue by customer" built from
+aggregate_documents). Translate it to the closest equivalent: use the
+underlying doctype (e.g. Sales Invoice) and real column fields (e.g.
+customer, grand_total) rather than the computed/aggregated labels you
+displayed (e.g. "Total Revenue" is not a real field — grand_total is).
+Tell the user plainly that the saved report shows the underlying rows with
+those columns, and that grouping/summing by customer is something they can
+do interactively once they open it in ERPNext's Report Builder view (via
+its own Group By sidebar) — the saved report itself stores columns and
+filters, not a pre-computed sum. Attempting a reasonable translation and
+explaining this limitation is always better than refusing outright.
+
+When the request compares or sums something across MULTIPLE different
+doctypes in one answer (e.g. "total outstanding Sales Invoices and total
+Delivery Note value in one summary"), use cross_doctype_summary instead of
+aggregate_documents — aggregate_documents only groups within a single
+doctype. A cross-doctype summary can never be saved with save_report
+(Report Builder only covers one doctype); if the user asks to save one,
+explain that it isn't possible as a standard saved report and offer to
+keep answering it live instead.
+
+ALWAYS surface the path to anything you just created or modified. Whenever
+a tool result includes a 'url' field (and/or 'dashboard_url', when a chart
+was also attached to a dashboard), include it in your reply as a proper
+Markdown link so it's clickable — e.g. "You can view it here:
+[Sales Invoice list](/app/sales-invoice)" or "Open the dashboard here:
+[Selling dashboard](/app/dashboard-view/Selling)". A bare path with no
+link syntax will NOT render as clickable, so always wrap it in
+[label](url) form. Do this for every successful create_doctype,
+create_dashboard_chart, add_chart_to_dashboard, and save_report result,
+not just when the user asks where to find it.
+
 When presenting tabular data (a list of invoices, customers, etc.), format
 it as a proper Markdown table with EVERY row on its own separate line —
 never run multiple rows together on one line. If you're summarizing
@@ -320,9 +426,18 @@ def _sanitize_tool_result(result):
 
 def _extract_text(content) -> str:
     """response.text can be None when the response has non-text parts
-    (e.g. a function_call). Pull whatever text parts exist instead."""
-    texts = [p.text for p in content.parts if getattr(p, "text", None)]
-    return "\n".join(texts) if texts else "(no text response)"
+    (e.g. a function_call). Pull whatever non-thought text parts exist.
+
+    Gemini thinking models expose their internal reasoning as Part objects
+    with thought=True. These must be excluded — they contain the model's
+    raw chain-of-thought (e.g. "Wait, let's check find_reports...") and
+    are not intended for the user. Only parts where thought is falsy
+    (None or False) are real reply text."""
+    texts = [
+        p.text for p in content.parts
+        if getattr(p, "text", None) and not getattr(p, "thought", False)
+    ]
+    return "\n".join(texts) if texts else ""
 
 
 def run():

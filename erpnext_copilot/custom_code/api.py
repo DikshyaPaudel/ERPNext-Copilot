@@ -408,7 +408,12 @@ def create_doctype(doctype_name: str, fields: list, module: str = "Custom"):
         doc.insert()
     except frappe.PermissionError:
         return {"error": "You don't have permission to create a new DocType. This usually requires the System Manager role."}
-    return {"success": True, "doctype": doctype_name, "fields_created": [f["fieldname"] for f in fields]}
+    return {
+        "success": True,
+        "doctype": doctype_name,
+        "fields_created": [f["fieldname"] for f in fields],
+        "url": _desk_list_url(doctype_name),
+    }
 
 
 @frappe.whitelist()
@@ -465,6 +470,7 @@ def add_chart_to_dashboard(chart_name: str, dashboard_name: str):
                 "message": f"Chart '{real_chart}' is already attached to Dashboard '{real_dashboard}'.",
                 "dashboard": real_dashboard,
                 "chart_name": real_chart,
+                "url": _dashboard_view_url(real_dashboard),
             }
 
     chart_link = frappe.get_doc({
@@ -486,6 +492,7 @@ def add_chart_to_dashboard(chart_name: str, dashboard_name: str):
         "message": f"Chart '{real_chart}' successfully added to Dashboard '{real_dashboard}'.",
         "dashboard": real_dashboard,
         "chart_name": real_chart,
+        "url": _dashboard_view_url(real_dashboard),
     }
 
 
@@ -528,18 +535,24 @@ def create_dashboard_chart(
         return {"error": "You don't have permission to create Dashboard Charts."}
 
     added_to_dashboard_msg = ""
+    dashboard_url = None
     if dashboard_name:
         add_res = add_chart_to_dashboard(chart_name=doc.name, dashboard_name=dashboard_name)
         if "error" in add_res:
             added_to_dashboard_msg = f" (Failed to add to dashboard '{dashboard_name}': {add_res['error']})"
         else:
             added_to_dashboard_msg = f" and added to Dashboard '{dashboard_name}'."
+            dashboard_url = add_res.get("url")
 
-    return {
+    result = {
         "success": True,
         "chart_name": doc.name,
+        "url": _dashboard_chart_url(doc.name),
         "message": f"Chart '{chart_name}' created{added_to_dashboard_msg}. View it under Dashboard > Charts, or in the Dashboard UI.",
     }
+    if dashboard_url:
+        result["dashboard_url"] = dashboard_url
+    return result
 
 @frappe.whitelist()
 def search_documents(doctype: str, filters: Optional[dict] = None, fields: Optional[list] = None, limit: int = 20):
@@ -694,6 +707,31 @@ def cross_doctype_summary(rows: list):
 # only ever called when the user explicitly asks to save the current view
 # as a reusable report, never automatically.
 # ---------------------------------------------------------------------------
+
+def _desk_list_url(doctype: str) -> str:
+    """Standard Frappe desk route to a DocType's list view
+    (/app/<slug>) — this specific pattern is stable and well-documented
+    across modern Frappe versions, more so than the chart/dashboard
+    routes below."""
+    slug = frappe.scrub(doctype).replace("_", "-")
+    return f"/app/{slug}"
+
+
+def _dashboard_chart_url(chart_name: str) -> str:
+    """Route to a Dashboard Chart's own form view. Less certain than
+    _desk_list_url — chart-specific desk routes have had more version
+    variance. Verify this resolves on your instance."""
+    from urllib.parse import quote
+    return f"/app/dashboard-chart/{quote(chart_name)}"
+
+
+def _dashboard_view_url(dashboard_name: str) -> str:
+    """Route to a Dashboard's own view page. Same caveat as
+    _dashboard_chart_url — verify against your instance before relying
+    on it in a demo."""
+    from urllib.parse import quote
+    return f"/app/dashboard-view/{quote(dashboard_name)}"
+
 
 def _report_url(doctype: str, report_name: Optional[str] = None) -> str:
     """Best-effort desk route to a doctype's Report view, or a specific

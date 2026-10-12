@@ -307,8 +307,18 @@ def _generate_and_stream(client, history, config):
             if getattr(part, "function_call", None):
                 collected_parts.append(part)
             elif getattr(part, "text", None):
-                text_so_far += part.text
-                _publish_chunk(part.text)
+                if getattr(part, "thought", False):
+                    # This is an internal reasoning/thinking chunk.
+                    # Collect it into history (Gemini requires thought
+                    # parts to be present in subsequent turns on some
+                    # model versions — same reason we kept
+                    # thought_signature on function-call parts) but never
+                    # stream it to the user or include it in the final
+                    # displayed text.
+                    collected_parts.append(part)
+                else:
+                    text_so_far += part.text
+                    _publish_chunk(part.text)
             else:
                 collected_parts.append(part)
 
@@ -322,13 +332,111 @@ def _generate_and_stream(client, history, config):
 
 def _call_model(client, history, config):
     """(#6) Wraps the streamed call with a hard timeout so a hung/slow
-    API call can't leave the request open indefinitely."""
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(_generate_and_stream, client, _trimmed(history), config)
-        try:
-            return future.result(timeout=MODEL_TIMEOUT_SECONDS)
-        except concurrent.futures.TimeoutError:
-            raise ModelTimeoutError(f"Gemini didn't respond within {MODEL_TIMEOUT_SECONDS}s.")
+    API call can't leave the request open indefinitely.
+
+    The executor is deliberately NOT used as a `with` block: its __exit__
+    calls shutdown(wait=True), which blocks until the worker thread
+    finishes — so a timed-out call would still hold the request open for
+    as long as the slow API call took, making the timeout a no-op. Here
+    shutdown(wait=False) lets the request return right at the deadline;
+    the abandoned worker simply finishes in the background (a thread
+    blocked on a network call can't be killed, only walked away from).
+    """
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(_generate_and_stream, client, _trimmed(history), config)
+    try:
+        return future.result(timeout=MODEL_TIMEOUT_SECONDS)
+    except concurrent.futures.TimeoutError:
+        raise ModelTimeoutError(f"Gemini didn't respond within {MODEL_TIMEOUT_SECONDS}s.")
+    finally:
+        executor.shutdown(wait=False)
+
+
+EMPTY_RESPONSE_MESSAGE = (
+    "I ran into a hiccup generating a response (the model returned nothing). "
+    "Your data wasn't changed — please send that again."
+)
+
+
+def _has_content(candidate_content, function_call):
+    """A model turn is usable only if it either calls a tool or carries
+    some non-empty non-thought text. A turn with only thought parts or
+    only whitespace is treated as empty and will be retried."""
+    if function_call:
+        return True
+    return any(
+        (getattr(p, "text", None) or "").strip()
+        for p in candidate_content.parts
+        if not getattr(p, "thought", False)
+    )
+
+
+def _call_model_reliably(client, history, config_with_tools):
+    """Calls the model, retrying when it returns an EMPTY turn (no text
+    and no function call).
+
+    Gemini occasionally does this right after a function response — the
+    tool ran fine, but the follow-up call that should summarize the result
+    comes back blank. Treating that as a final answer is what produced
+    "(no text response)" followed by a normal answer on the user's next
+    message. Retrying is cheap and usually succeeds.
+
+    Attempt plan:
+      1. normal call (tools enabled)
+      2. same again (empty responses are usually transient)
+      3. tools DISABLED — if the model keeps stalling (e.g. wanting to
+         call a tool but emitting nothing), removing tools forces it to
+         answer in plain text. The original console version of this
+         project used a tools-free config for exactly this "turn a tool
+         result into prose" step, so this combination is known to work on
+         this SDK version.
+
+    Returns (candidate_content, function_call), or (None, None) if every
+    attempt came back empty. The empty turns are never returned, so
+    callers never append them to history or persist them.
+    """
+    config_no_tools = types.GenerateContentConfig(system_instruction=SYSTEM_INSTRUCTION)
+    for config in (config_with_tools, config_with_tools, config_no_tools):
+        candidate_content, function_call = _call_model(client, history, config)
+        if _has_content(candidate_content, function_call):
+            return candidate_content, function_call
+    return None, None
+
+
+def _report_failure(stage, exc):
+    """Log the FULL traceback to Frappe's Error Log (/app/error-log) and
+    return a short message for the chat that names the real exception.
+
+    Without this, any unexpected exception (a DB error, a Gemini client
+    error, a Redis hiccup) escaped as a bare HTTP 500: the chat showed
+    nothing useful and the cause had to be dug out of terminal output.
+    Showing the exception type + message (truncated) in the chat, with the
+    traceback one click away in Error Log, makes the next failure
+    diagnosable immediately instead of a guessing game.
+    """
+    try:
+        frappe.log_error(title=f"Copilot: failure while {stage}", message=frappe.get_traceback())
+    except Exception:
+        pass  # never let the error reporter itself mask the original error
+    return (
+        f"Something went wrong while {stage}: {type(exc).__name__}: {str(exc)[:300]}. "
+        "The full traceback is in Error Log (/app/error-log)."
+    )
+
+
+def _run_tool(fn_name, fn_args):
+    """Run one tool, converting an unexpected exception into an
+    {"error": ...} result instead of letting it escape as a raw 500.
+    The model then sees the failure as a normal tool result and can
+    explain it, and the traceback is logged for debugging."""
+    fn = TOOL_DISPATCH.get(fn_name)
+    if not fn:
+        return {"error": f"Unknown tool {fn_name}"}
+    try:
+        return fn(**fn_args)
+    except Exception as e:
+        _report_failure(f"running tool {fn_name}", e)
+        return {"error": f"{fn_name} failed: {type(e).__name__}: {str(e)[:300]}"}
 
 
 @frappe.whitelist()
@@ -351,10 +459,21 @@ def ask_agent(message: str, conversation: Optional[str] = None):
 
     for _ in range(MAX_TOOL_STEPS):
         try:
-            candidate_content, function_call = _call_model(client, history, config_with_tools)
+            candidate_content, function_call = _call_model_reliably(client, history, config_with_tools)
         except ModelTimeoutError as e:
             _save_conversation(doc, history_raw, set_title_from=message)
             return {"type": "reply", "text": f"Still working on that — {e} Please try again in a moment.", "conversation": doc.name}
+        except Exception as e:
+            _save_conversation(doc, history_raw, set_title_from=message)
+            return {"type": "reply", "text": _report_failure("asking the model", e), "conversation": doc.name}
+
+        if candidate_content is None:
+            # Every attempt came back empty. Save what happened so far
+            # (the user's message and any tool results) but NOT an empty
+            # model turn — persisting one would leave a blank turn in the
+            # transcript for every later call to trip over.
+            _save_conversation(doc, history_raw, set_title_from=message)
+            return {"type": "reply", "text": EMPTY_RESPONSE_MESSAGE, "conversation": doc.name}
 
         history.append(candidate_content)
         history_raw.append(_content_to_raw(candidate_content))
@@ -379,8 +498,7 @@ def ask_agent(message: str, conversation: Optional[str] = None):
 
         _publish_status(f"Calling {fn_name}...")
 
-        fn = TOOL_DISPATCH.get(fn_name)
-        result = fn(**fn_args) if fn else {"error": f"Unknown tool {fn_name}"}
+        result = _run_tool(fn_name, fn_args)
         clean_result = _sanitize_tool_result(result)
 
         fn_response_content = types.Content(role="user", parts=[types.Part.from_function_response(name=fn_name, response={"result": clean_result})])
@@ -408,8 +526,7 @@ def confirm_pending_action(approved: bool):
 
     if approved:
         _publish_status(f"Calling {fn_name}...")
-        fn = TOOL_DISPATCH.get(fn_name)
-        result = fn(**fn_args) if fn else {"error": f"Unknown tool {fn_name}"}
+        result = _run_tool(fn_name, fn_args)
     else:
         result = {"cancelled": True, "message": "Action cancelled by user."}
 
@@ -432,10 +549,17 @@ def _continue_after_tool_result(doc, history_raw):
 
     for _ in range(MAX_TOOL_STEPS):
         try:
-            candidate_content, function_call = _call_model(client, history, config_with_tools)
+            candidate_content, function_call = _call_model_reliably(client, history, config_with_tools)
         except ModelTimeoutError as e:
             _save_conversation(doc, history_raw)
             return {"type": "reply", "text": f"Still working on that — {e} Please try again in a moment.", "conversation": doc.name}
+        except Exception as e:
+            _save_conversation(doc, history_raw)
+            return {"type": "reply", "text": _report_failure("asking the model", e), "conversation": doc.name}
+
+        if candidate_content is None:
+            _save_conversation(doc, history_raw)
+            return {"type": "reply", "text": EMPTY_RESPONSE_MESSAGE, "conversation": doc.name}
 
         history.append(candidate_content)
         history_raw.append(_content_to_raw(candidate_content))
@@ -458,8 +582,7 @@ def _continue_after_tool_result(doc, history_raw):
 
         _publish_status(f"Calling {fn_name}...")
 
-        fn = TOOL_DISPATCH.get(fn_name)
-        result = fn(**fn_args) if fn else {"error": f"Unknown tool {fn_name}"}
+        result = _run_tool(fn_name, fn_args)
         clean_result = _sanitize_tool_result(result)
 
         fn_response_content = types.Content(
