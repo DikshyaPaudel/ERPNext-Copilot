@@ -166,11 +166,7 @@ Two front ends share the same tool layer: `gemini_agent.py` (console REPL) and `
 
 - **No update/submit/cancel/delete tools yet.** Every write tool only creates something new. Marking an invoice paid, submitting a Purchase Order, or reassigning a ticket still requires the regular ERPNext UI.
 - `clean_uploaded_file` makes a separate blocking Gemini call on top of the main loop — not yet moved to a background job.
-- The tool-call audit log is written correctly but not yet surfaced in the chat UI — `get_tool_calls()` exists and works, it just isn't wired into a visible panel.
-- The console REPL (`gemini_agent.py`) has not received the web chat's recent upgrades — no streaming, no persisted multi-conversation history, no audit logging.
-- `import_data_to_doctype` reports failures as a flat list with no per-row retry.
-- No automated test suite — verification has been manual, tool-by-tool.
-- Only tested as Administrator — multi-user/role-based permission behavior has not been verified end-to-end.
+
 
 ---
 
